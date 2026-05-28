@@ -1,0 +1,186 @@
+package com.example.shopsecure.service;
+
+import com.example.shopsecure.dto.request.CheckoutRequest;
+import com.example.shopsecure.dto.request.CheckoutSummaryRequest;
+import com.example.shopsecure.dto.response.CheckoutSummaryResponse;
+import com.example.shopsecure.dto.response.OrderItemResponse;
+import com.example.shopsecure.dto.response.OrderResponse;
+import com.example.shopsecure.entity.*;
+import com.example.shopsecure.repository.*;
+import lombok.RequiredArgsConstructor;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.UUID;
+
+@Service
+@RequiredArgsConstructor
+@Transactional
+public class CheckoutService {
+
+    private final CartRepository cartRepository;
+    private final CartItemRepository cartItemRepository;
+    private final OrderRepository orderRepository;
+    private final OrderItemRepository orderItemRepository;
+    private final CartService cartService;
+    private final ProductRepository productRepository;
+    private final WalletService walletService;
+
+    public CheckoutSummaryResponse calculateCheckout(
+            CheckoutSummaryRequest request
+    ) {
+
+        Cart cart = cartRepository
+                .findBySessionIdAndBusiness_Id(
+                        request.getSessionId(),
+                        request.getBusinessId()
+                )
+                .orElseThrow(() ->
+                        new RuntimeException("Cart not found"));
+
+        List<CartItem> cartItems =
+                cartItemRepository.findByCart_Id(cart.getId());
+
+        if (cartItems.isEmpty()) {
+            throw new RuntimeException("Cart is empty");
+        }
+
+        validateStock(cartItems);
+
+        BigDecimal subtotal = cart.getTotalAmount();
+
+        Integer totalItems = cartItems.stream()
+                .mapToInt(CartItem::getQuantity)
+                .sum();
+
+        // Static fee for MVP
+        BigDecimal deliveryFee = BigDecimal.valueOf(3000);
+
+        BigDecimal totalAmount =
+                subtotal.add(deliveryFee);
+
+        return CheckoutSummaryResponse.builder()
+                .subtotal(subtotal)
+                .deliveryFee(deliveryFee)
+                .totalAmount(totalAmount)
+                .totalItems(totalItems)
+                .build();
+    }
+
+
+
+    public OrderResponse checkout(CheckoutRequest request) {
+
+        Cart cart = cartRepository
+                .findBySessionIdAndBusiness_Id(
+                        request.getSessionId(),
+                        request.getBusinessId()
+                )
+                .orElseThrow(() -> new RuntimeException("Cart not found"));
+
+        List<CartItem> cartItems =
+                cartItemRepository.findByCart_Id(cart.getId());
+
+        if (cartItems.isEmpty()) {
+            throw new RuntimeException("Cart is empty");
+        }
+
+        validateStock(cartItems);
+
+        String orderNumber =
+                "ORD-" + UUID.randomUUID()
+                        .toString()
+                        .substring(0, 8)
+                        .toUpperCase();
+
+        Order order = Order.builder()
+                .orderNumber(orderNumber)
+                .business(cart.getBusiness())
+                .customerName(request.getCustomerName())
+                .email(request.getEmail())
+                .phoneNumber(request.getPhoneNumber())
+                .deliveryAddress(request.getDeliveryAddress())
+                .totalAmount(cart.getTotalAmount())
+                .status(OrderStatus.PENDING)
+                .paymentStatus("PENDING")
+                .createdAt(LocalDateTime.now())
+                .build();
+
+        Order savedOrder = orderRepository.save(order);
+
+        for (CartItem cartItem : cartItems) {
+
+            OrderItem orderItem = OrderItem.builder()
+                    .order(savedOrder)
+                    .product(cartItem.getProduct())
+                    .quantity(cartItem.getQuantity())
+                    .price(cartItem.getPrice())
+                    .subtotal(cartItem.getSubtotal())
+                    .build();
+
+            orderItemRepository.save(orderItem);
+            Product product = cartItem.getProduct();
+            product.setStock(product.getStock() - cartItem.getQuantity());
+            productRepository.save(product);
+        }
+
+        cartService.clearCart(cart);
+
+        return mapToResponse(savedOrder);
+    }
+
+    private void validateStock(List<CartItem> cartItems) {
+
+        for (CartItem cartItem : cartItems) {
+
+            Product product = cartItem.getProduct();
+
+            if (product.getStock() < cartItem.getQuantity()) {
+                throw new RuntimeException(
+                        product.getName() + " is out of stock"
+                );
+            }
+        }
+    }
+
+    public OrderResponse getOrderByOrderNumber(
+            String orderNumber
+    ) {
+
+        Order order = orderRepository
+                .findByOrderNumber(orderNumber)
+                .orElseThrow(() -> new RuntimeException("Order not found"));
+
+        return mapToResponse(order);
+    }
+
+
+    private OrderResponse mapToResponse(Order order) {
+
+        List<OrderItemResponse> items =
+                orderItemRepository.findByOrder_Id(order.getId())
+                        .stream()
+                        .map(item -> OrderItemResponse.builder()
+                                .productName(item.getProduct().getName())
+                                .quantity(item.getQuantity())
+                                .price(item.getPrice())
+                                .subtotal(item.getSubtotal())
+                                .build())
+                        .toList();
+        return OrderResponse.builder()
+                .orderId(order.getId())
+                .orderNumber(order.getOrderNumber())
+                .customerName(order.getCustomerName())
+                .email(order.getEmail())
+                .phoneNumber(order.getPhoneNumber())
+                .deliveryAddress(order.getDeliveryAddress())
+                .totalAmount(order.getTotalAmount())
+                .status(order.getStatus())
+                .items(items)
+                .createdAt(order.getCreatedAt())
+                .build();
+    }
+}

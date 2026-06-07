@@ -1,5 +1,7 @@
 package com.example.shopsecure.dto.request;
 
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -7,7 +9,9 @@ import lombok.Setter;
 @Setter
 public class CheckoutSummaryRequest {
 
+    @NotBlank(message = "Session ID is required")
     private String sessionId;
 
+    @NotNull(message = "Business ID is required")
     private Long businessId;
 }

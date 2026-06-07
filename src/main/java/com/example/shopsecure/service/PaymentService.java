@@ -3,6 +3,7 @@ package com.example.shopsecure.service;
 import com.example.shopsecure.dto.request.InitializePaymentRequest;
 import com.example.shopsecure.dto.request.PaystackWebhookRequest;
 import com.example.shopsecure.dto.response.InitializePaymentResponse;
+import com.example.shopsecure.dto.response.OrderResponse;
 import com.example.shopsecure.entity.Order;
 import com.example.shopsecure.entity.Payment;
 import com.example.shopsecure.entity.PaymentStatus;
@@ -26,6 +27,10 @@ public class PaymentService {
     private final OrderRepository orderRepository;
     private final PaystackService paystackService;
     private final WalletService walletService;
+    private final EmailService emailService;
+    private final EmailTemplateService emailTemplateService;
+    private final CheckoutService checkoutService;
+
     public InitializePaymentResponse initializePayment(
             InitializePaymentRequest request
     ) {
@@ -118,5 +123,46 @@ public class PaymentService {
 
         // Credit the business wallet
         walletService.addToProcessingBalance(order.getId());
+// Send customer confirmation email
+        try {
+            String customerHtml = emailTemplateService.customerOrderConfirmationBody(
+                    order.getCustomerName(),
+                    order.getOrderNumber(),
+                    "₦" + order.getTotalAmount().toPlainString()
+            );
+            emailService.sendEmail(
+                    order.getEmail(),
+                    "Order Confirmed - " + order.getOrderNumber(),
+                    customerHtml
+            );
+        } catch (Exception e) {
+            // log but don't fail the webhook
+            System.err.println("Failed to send customer email: " + e.getMessage());
+        }
+
+// Send vendor new order email
+        try {
+            String sellerHtml = emailTemplateService.sellerNewOrderBody(
+                    order.getCustomerName(),
+                    order.getOrderNumber(),
+                    "₦" + order.getTotalAmount().toPlainString()
+            );
+            emailService.sendEmail(
+                    order.getBusiness().getOwner().getEmail(),
+                    "New Order Received - " + order.getOrderNumber(),
+                    sellerHtml
+            );
+        } catch (Exception e) {
+            System.err.println("Failed to send vendor email: " + e.getMessage());
+        }
     }
+
+    public OrderResponse getOrderByReference(String reference) {
+        Payment payment = paymentRepository.findByReference(reference)
+                .orElseThrow(() -> new RuntimeException("Payment not found"));
+        return checkoutService.getOrderByOrderNumber(payment.getOrder().getOrderNumber());
+    }
+
+
+
 }

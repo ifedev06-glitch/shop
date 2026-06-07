@@ -19,5 +19,11 @@ public class PaystackWebhookRequest {
 
         @JsonProperty("paid_at")
         private String paidAt;
+
+        @JsonProperty("transfer_code")
+        private String transferCode;
+
+        @JsonProperty("reason")
+        private String reason;
     }
 }

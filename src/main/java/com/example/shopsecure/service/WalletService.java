@@ -37,43 +37,54 @@ public class WalletService {
     }
 
     public WalletResponse addToProcessingBalance(Long orderId) {
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() ->
-                        new RuntimeException("Order not found"));
+        Order order = orderRepository.findByIdForUpdate(orderId)
+                .orElseThrow(() -> new RuntimeException("Order not found"));
+
         Business business = order.getBusiness();
+
         Wallet wallet = walletRepository
-                .findByBusiness_Id(business.getId())
+                .findByBusiness_IdForUpdate(business.getId())
                 .orElseGet(() -> createWallet(business));
+
         BigDecimal amount = order.getTotalAmount();
         wallet.setProcessingBalance(
                 wallet.getProcessingBalance().add(amount));
+
         Wallet saved = walletRepository.save(wallet);
         return mapToResponse(saved);
     }
 
     public WalletResponse releaseFunds(Long orderId) {
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() ->
-                        new RuntimeException("Order not found"));
+        Order order = orderRepository.findByIdForUpdate(orderId)
+                .orElseThrow(() -> new RuntimeException("Order not found"));
+
         if (Boolean.TRUE.equals(order.getSettled())) {
             throw new RuntimeException("Funds already released");
         }
         if (order.getStatus() != OrderStatus.SHIPPED) {
-            throw new RuntimeException("Order has not been shipped yet");}
+            throw new RuntimeException("Order has not been shipped yet");
+        }
+
         Business business = order.getBusiness();
+
         Wallet wallet = walletRepository
-                .findByBusiness_Id(business.getId())
-                .orElseThrow(() ->
-                        new RuntimeException("Wallet not found"));
+                .findByBusiness_IdForUpdate(business.getId())
+                .orElseThrow(() -> new RuntimeException("Wallet not found"));
+
         BigDecimal amount = order.getTotalAmount();
         if (wallet.getProcessingBalance().compareTo(amount) < 0) {
-            throw new RuntimeException("Insufficient processing balance");}
+            throw new RuntimeException("Insufficient processing balance");
+        }
+
         wallet.setProcessingBalance(
                 wallet.getProcessingBalance().subtract(amount));
-        wallet.setAvailableBalance(wallet.getAvailableBalance().add(amount));
+        wallet.setAvailableBalance(
+                wallet.getAvailableBalance().add(amount));
+
         walletRepository.save(wallet);
         order.setSettled(true);
         orderRepository.save(order);
+
         return mapToResponse(wallet);
     }
 

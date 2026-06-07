@@ -21,4 +21,10 @@ public class CartResponse {
     private BigDecimal totalAmount;
 
     private List<CartItemResponse> items;
+
+    private BigDecimal subtotal;
+
+    private BigDecimal deliveryFee;
+
+
 }

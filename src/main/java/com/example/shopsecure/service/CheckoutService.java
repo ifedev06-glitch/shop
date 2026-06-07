@@ -1,7 +1,9 @@
 package com.example.shopsecure.service;
 
+import com.example.shopsecure.dto.request.CategoryRequest;
 import com.example.shopsecure.dto.request.CheckoutRequest;
 import com.example.shopsecure.dto.request.CheckoutSummaryRequest;
+import com.example.shopsecure.dto.request.UpdateOrderStatusRequest;
 import com.example.shopsecure.dto.response.CheckoutSummaryResponse;
 import com.example.shopsecure.dto.response.OrderItemResponse;
 import com.example.shopsecure.dto.response.OrderResponse;
@@ -28,6 +30,10 @@ public class CheckoutService {
     private final CartService cartService;
     private final ProductRepository productRepository;
     private final WalletService walletService;
+    private final EmailTemplateService emailTemplateService;
+    private final EmailService emailService;
+
+    private static final BigDecimal DELIVERY_FEE = BigDecimal.valueOf(100);
 
     public CheckoutSummaryResponse calculateCheckout(
             CheckoutSummaryRequest request
@@ -57,7 +63,7 @@ public class CheckoutService {
                 .sum();
 
         // Static fee for MVP
-        BigDecimal deliveryFee = BigDecimal.valueOf(3000);
+        BigDecimal deliveryFee = BigDecimal.valueOf(100);
 
         BigDecimal totalAmount =
                 subtotal.add(deliveryFee);
@@ -96,6 +102,8 @@ public class CheckoutService {
                         .substring(0, 8)
                         .toUpperCase();
 
+        BigDecimal totalWithDelivery = cart.getTotalAmount().add(DELIVERY_FEE);
+
         Order order = Order.builder()
                 .orderNumber(orderNumber)
                 .business(cart.getBusiness())
@@ -103,7 +111,7 @@ public class CheckoutService {
                 .email(request.getEmail())
                 .phoneNumber(request.getPhoneNumber())
                 .deliveryAddress(request.getDeliveryAddress())
-                .totalAmount(cart.getTotalAmount())
+                .totalAmount(totalWithDelivery)
                 .status(OrderStatus.PENDING)
                 .paymentStatus("PENDING")
                 .createdAt(LocalDateTime.now())
@@ -146,6 +154,7 @@ public class CheckoutService {
         }
     }
 
+
     public OrderResponse getOrderByOrderNumber(
             String orderNumber
     ) {
@@ -156,6 +165,23 @@ public class CheckoutService {
 
         return mapToResponse(order);
     }
+
+    public OrderResponse orderReadyForDelivery(
+            Long orderId,
+            UpdateOrderStatusRequest request
+    ) {
+
+        Order order = orderRepository
+                .findById(orderId)
+                .orElseThrow(() ->
+                        new RuntimeException("Order not found"));
+
+        order.setStatus(request.getStatus());
+
+        Order saved = orderRepository.save(order);
+        return mapToResponse(saved);
+    }
+
 
 
     private OrderResponse mapToResponse(Order order) {

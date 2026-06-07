@@ -11,6 +11,8 @@ import com.example.shopsecure.repository.CategoryRepository;
 import com.example.shopsecure.repository.ProductRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -27,33 +29,29 @@ public class StorefrontService {
     @Value("${app.base-url}")
     private String baseUrl;
 
+    @Cacheable(value = "storefront", key = "#slug")
     public BusinessResponse getStorefront(String slug) {
         Business business = businessRepository.findByStorefrontSlug(slug)
                 .orElseThrow(() -> new RuntimeException("Store not found"));
-
         return toBusinessResponse(business);
     }
 
+    @Cacheable(value = "storeProducts", key = "#slug")
     public List<ProductResponse> getStoreProducts(String slug) {
-        Business business = businessRepository.findByStorefrontSlug(slug)
-                .orElseThrow(() -> new RuntimeException("Store not found"));
-
-        return productRepository.findByBusiness_Id(business.getId())
+        return productRepository.findBySlugWithDetails(slug)
                 .stream()
                 .map(this::toProductResponse)
                 .collect(Collectors.toList());
     }
 
+    @Cacheable(value = "storeProduct", key = "#slug + '-' + #productId")
     public ProductResponse getStoreProduct(String slug, Long productId) {
-        Business business = businessRepository.findByStorefrontSlug(slug)
-                .orElseThrow(() -> new RuntimeException("Store not found"));
-
-        Product product = productRepository.findByIdAndBusiness_Id(productId, business.getId())
+        return productRepository.findByIdAndSlugWithDetails(productId, slug)
+                .map(this::toProductResponse)
                 .orElseThrow(() -> new RuntimeException("Product not found in this store"));
-
-        return toProductResponse(product);
     }
 
+    @Cacheable(value = "storeCategories", key = "#slug")
     public List<CategoryResponse> getStoreCategories(String slug) {
         Business business = businessRepository.findByStorefrontSlug(slug)
                 .orElseThrow(() -> new RuntimeException("Store not found"));
@@ -64,17 +62,17 @@ public class StorefrontService {
                 .collect(Collectors.toList());
     }
 
+    @Cacheable(value = "storeProductsByCategory", key = "#slug + '-' + #categoryId")
     public List<ProductResponse> getStoreProductsByCategory(String slug, Long categoryId) {
-        Business business = businessRepository.findByStorefrontSlug(slug)
-                .orElseThrow(() -> new RuntimeException("Store not found"));
-
-        categoryRepository.findByIdAndBusiness_Id(categoryId, business.getId())
-                .orElseThrow(() -> new RuntimeException("Category not found in this store"));
-
-        return productRepository.findByBusiness_IdAndCategory_Id(business.getId(), categoryId)
+        return productRepository.findBySlugAndCategoryWithDetails(slug, categoryId)
                 .stream()
                 .map(this::toProductResponse)
                 .collect(Collectors.toList());
+    }
+
+    @CacheEvict(value = {"storeProducts", "storeProductsByCategory", "storeProduct"}, allEntries = true)
+    public void evictProductCaches() {
+        // Call this from your ProductService whenever a product is created, updated, or deleted
     }
 
     private BusinessResponse toBusinessResponse(Business business) {

@@ -33,6 +33,9 @@ public class User implements UserDetails {
 
     private LocalDateTime createdAt;
 
+    @Column(name = "transaction_pin")
+    private String transactionPin;
+
     @OneToOne
     private Business business;
 

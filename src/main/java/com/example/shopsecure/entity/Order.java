@@ -45,5 +45,13 @@ public class Order {
 
     private LocalDateTime createdAt;
 
+    @Column(unique = true)
+    private String paymentReference;
+
+    private String title;
+
+    @Column(columnDefinition = "TEXT")
+    private String description;
+
 
 }

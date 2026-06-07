@@ -2,6 +2,7 @@ package com.example.shopsecure.controller;
 
 import com.example.shopsecure.dto.request.CheckoutRequest;
 import com.example.shopsecure.dto.request.CheckoutSummaryRequest;
+import com.example.shopsecure.dto.request.UpdateOrderStatusRequest;
 import com.example.shopsecure.dto.response.CheckoutSummaryResponse;
 import com.example.shopsecure.dto.response.OrderResponse;
 import com.example.shopsecure.service.CartService;
@@ -40,6 +41,16 @@ public class CheckoutController {
             @PathVariable String orderNumber
     ) {
         return checkoutService.getOrderByOrderNumber(orderNumber);
+    }
+
+
+    @PutMapping("/{orderId}/status")
+    public OrderResponse orderReadyForDelivery(
+            @PathVariable Long orderId,
+            @RequestBody UpdateOrderStatusRequest request
+    ) {
+        return checkoutService
+                .orderReadyForDelivery(orderId, request);
     }
 
 

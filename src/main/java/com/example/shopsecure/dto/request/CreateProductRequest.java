@@ -1,7 +1,6 @@
 package com.example.shopsecure.dto.request;
 
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.*;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -11,18 +10,22 @@ import java.math.BigDecimal;
 @Setter
 public class CreateProductRequest {
 
-    @NotBlank
+    @NotBlank(message = "Product name is required")
+    @Size(max = 200, message = "Product name cannot exceed 200 characters")
     private String name;
 
-    @NotBlank
+    @NotBlank(message = "Description is required")
+    @Size(max = 2000, message = "Description cannot exceed 2000 characters")
     private String description;
 
-    @NotNull
+    @NotNull(message = "Price is required")
+    @DecimalMin(value = "1.00", message = "Price must be at least ₦1")
     private BigDecimal price;
 
-    @NotNull
+    @NotNull(message = "Stock is required")
+    @Min(value = 0, message = "Stock cannot be negative")
     private Integer stock;
 
-    @NotNull
+    @NotNull(message = "Category is required")
     private Long categoryId;
 }

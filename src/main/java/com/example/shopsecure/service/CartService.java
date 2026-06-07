@@ -15,6 +15,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.stream.Stream;
 
 @Service
 @RequiredArgsConstructor
@@ -29,6 +30,7 @@ public class CartService {
     private final UserRepository userRepository;
     private final BusinessRepository businessRepository;
 
+    private static final BigDecimal DELIVERY_FEE = BigDecimal.valueOf(4000);
 
 
     public CartResponse addToCart(AddToCartRequest request) {
@@ -213,6 +215,7 @@ public class CartService {
                                 .subtotal(item.getSubtotal())
                                 .build())
                         .toList();
+
         return OrderResponse.builder()
                 .orderId(order.getId())
                 .orderNumber(order.getOrderNumber())
@@ -220,15 +223,14 @@ public class CartService {
                 .email(order.getEmail())
                 .phoneNumber(order.getPhoneNumber())
                 .deliveryAddress(order.getDeliveryAddress())
+                .title(order.getTitle())              // <-- add this
+                .description(order.getDescription())  // <-- add this
                 .totalAmount(order.getTotalAmount())
                 .status(order.getStatus())
                 .items(items)
                 .createdAt(order.getCreatedAt())
                 .build();
     }
-
-
-
 
     private CartResponse mapToResponse(Cart cart) {
 
@@ -259,13 +261,14 @@ public class CartService {
                 .cartId(cart.getId())
                 .sessionId(cart.getSessionId())
                 .businessName(cart.getBusiness().getBusinessName())
-                .totalAmount(cart.getTotalAmount())
+                .subtotal(cart.getTotalAmount())
+                .deliveryFee(DELIVERY_FEE)
+                .totalAmount(cart.getTotalAmount().add(DELIVERY_FEE))
                 .items(itemResponses)
                 .build();
     }
-
-    //////////////////////////////////
-
+    //////////////////////////////////Temoorary, till i clean code//////
+    ///
     @Transactional(readOnly = true)
     public List<OrderResponse> getPendingOrders() {
         User currentUser = getCurrentUser();
@@ -275,14 +278,20 @@ public class CartService {
                 .orElseThrow(() ->
                         new RuntimeException("Business not found"));
 
-        List<Order> orders = orderRepository
+        List<Order> pendingOrders = orderRepository
                 .findByBusiness_IdAndStatusAndPaymentStatus(
                         business.getId(),
                         OrderStatus.PENDING,
                         "PAID"
                 );
 
-        return orders.stream()
+        List<Order> readyForPickupOrders = orderRepository
+                .findByBusiness_IdAndStatus(
+                        business.getId(),
+                        OrderStatus.READY_FOR_PICKUP
+                );
+
+        return Stream.concat(pendingOrders.stream(), readyForPickupOrders.stream())
                 .map(this::mapToOrderResponse)
                 .toList();
     }

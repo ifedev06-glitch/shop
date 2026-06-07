@@ -33,4 +33,7 @@ public class OrderResponse {
     private List<OrderItemResponse> items;
 
     private LocalDateTime createdAt;
+
+    private String title;
+    private String description;
 }

@@ -6,10 +6,6 @@ public enum OrderStatus {
 
     READY_FOR_PICKUP,
 
-    PROCESSING,
-
-    PAID,
-
     SHIPPED,
 
     DELIVERED,

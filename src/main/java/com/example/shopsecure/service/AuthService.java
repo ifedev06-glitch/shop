@@ -35,19 +35,27 @@ public class AuthService {
                 .lastname(request.getLastname())
                 .email(request.getEmail())
                 .password(passwordEncoder.encode(request.getPassword()))
-                .role(Role.BUSINESS) // default role, can be derived from request later
+                .role(Role.BUSINESS)
                 .createdAt(LocalDateTime.now())
                 .build();
 
         userRepository.save(user);
 
         String token = jwtService.generateToken(user);
-        return new AuthResponse(token,"Account Created Successfully");
+
+        return AuthResponse.builder()
+                .token(token)
+                .message("Account Created Successfully")
+                .userId(user.getId())
+                .firstname(user.getFirstname())
+                .lastname(user.getLastname())
+                .email(user.getEmail())
+                .role(user.getRole())
+                .build();
     }
 
     public AuthResponse login(LoginRequest request) {
 
-        // This handles bad credentials automatically — throws AuthenticationException if invalid
         authenticationManager.authenticate(
                 new UsernamePasswordAuthenticationToken(
                         request.getEmail(),
@@ -59,6 +67,15 @@ public class AuthService {
                 .orElseThrow(() -> new RuntimeException("User not found"));
 
         String token = jwtService.generateToken(user);
-        return new AuthResponse(token,"Login Successful");
+
+        return AuthResponse.builder()
+                .token(token)
+                .message("Login Successful")
+                .userId(user.getId())
+                .firstname(user.getFirstname())
+                .lastname(user.getLastname())
+                .email(user.getEmail())
+                .role(user.getRole())
+                .build();
     }
 }

@@ -5,6 +5,7 @@ import com.example.shopsecure.dto.response.ProductResponse;
 import com.example.shopsecure.entity.*;
 import com.example.shopsecure.repository.*;
 import lombok.RequiredArgsConstructor;
+import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -23,6 +24,7 @@ public class ProductService {
     private final BusinessRepository businessRepository;
     private final UserRepository userRepository;
     private final CloudinaryService cloudinaryService;
+
 
     public ProductResponse createProduct(CreateProductRequest request, List<MultipartFile> images) {
 
@@ -165,4 +167,6 @@ public class ProductService {
                 .createdAt(product.getCreatedAt())
                 .build();
     }
+
+
 }

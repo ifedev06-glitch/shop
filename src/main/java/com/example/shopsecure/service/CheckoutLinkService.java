@@ -33,7 +33,7 @@ public class CheckoutLinkService {
     private final PaymentRepository paymentRepository;
     private final PaystackService paystackService;
 
-    private static final BigDecimal DELIVERY_FEE = new BigDecimal("100.00");
+    private static final BigDecimal DELIVERY_FEE = new BigDecimal("4000.00");
 
     @Value("${app.base-url}")
     private String baseUrl;

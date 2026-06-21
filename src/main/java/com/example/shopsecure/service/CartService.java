@@ -6,6 +6,8 @@ import com.example.shopsecure.dto.response.CartResponse;
 import com.example.shopsecure.dto.response.OrderItemResponse;
 import com.example.shopsecure.dto.response.OrderResponse;
 import com.example.shopsecure.entity.*;
+import com.example.shopsecure.exception.BusinessException;
+import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -36,10 +38,10 @@ public class CartService {
     public CartResponse addToCart(AddToCartRequest request) {
 
         Product product = productRepository.findById(request.getProductId())
-                .orElseThrow(() -> new RuntimeException("Product not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Product not found")); // ← changed
 
         if (product.getStock() < request.getQuantity()) {
-            throw new RuntimeException("Insufficient stock");
+            throw new BusinessException("Insufficient stock"); // ← changed
         }
 
         Business business = product.getBusiness();
@@ -84,7 +86,7 @@ public class CartService {
                     cartItem.getQuantity() + request.getQuantity();
 
             if (product.getStock() < newQuantity) {
-                throw new RuntimeException("Insufficient stock");
+                throw new BusinessException("Insufficient stock"); // ← changed
             }
 
             cartItem.setQuantity(newQuantity);
@@ -107,7 +109,7 @@ public class CartService {
 
         Cart cart = cartRepository
                 .findBySessionIdAndBusiness_Id(sessionId, businessId)
-                .orElseThrow(() -> new RuntimeException("Cart not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Cart not found")); // ← changed
 
         return mapToResponse(cart);
     }
@@ -121,16 +123,16 @@ public class CartService {
 
         Cart cart = cartRepository
                 .findBySessionIdAndBusiness_Id(sessionId, businessId)
-                .orElseThrow(() -> new RuntimeException("Cart not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Cart not found")); // ← changed
 
         CartItem cartItem = cartItemRepository
                 .findByCart_IdAndProduct_Id(cart.getId(), productId)
-                .orElseThrow(() -> new RuntimeException("Cart item not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Cart item not found")); // ← changed
 
         Product product = cartItem.getProduct();
 
         if (product.getStock() < quantity) {
-            throw new RuntimeException("Insufficient stock");
+            throw new BusinessException("Insufficient stock"); // ← changed
         }
 
         cartItem.setQuantity(quantity);
@@ -156,11 +158,11 @@ public class CartService {
 
         Cart cart = cartRepository
                 .findBySessionIdAndBusiness_Id(sessionId, businessId)
-                .orElseThrow(() -> new RuntimeException("Cart not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Cart not found")); // ← changed
 
         CartItem cartItem = cartItemRepository
                 .findByCart_IdAndProduct_Id(cart.getId(), productId)
-                .orElseThrow(() -> new RuntimeException("Cart item not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Cart item not found")); // ← changed
 
         cartItemRepository.delete(cartItem);
 
@@ -199,7 +201,7 @@ public class CartService {
                 .getName();
 
         return userRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException("User not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("User not found")); // ← changed
     }
 
 
@@ -223,8 +225,8 @@ public class CartService {
                 .email(order.getEmail())
                 .phoneNumber(order.getPhoneNumber())
                 .deliveryAddress(order.getDeliveryAddress())
-                .title(order.getTitle())              // <-- add this
-                .description(order.getDescription())  // <-- add this
+                .title(order.getTitle())
+                .description(order.getDescription())
                 .totalAmount(order.getTotalAmount())
                 .status(order.getStatus())
                 .items(items)
@@ -267,6 +269,7 @@ public class CartService {
                 .items(itemResponses)
                 .build();
     }
+
     //////////////////////////////////Temoorary, till i clean code//////
     ///
     @Transactional(readOnly = true)
@@ -276,7 +279,7 @@ public class CartService {
         Business business = businessRepository
                 .findByOwner_Id(currentUser.getId())
                 .orElseThrow(() ->
-                        new RuntimeException("Business not found"));
+                        new ResourceNotFoundException("Business not found")); // ← changed
 
         List<Order> pendingOrders = orderRepository
                 .findByBusiness_IdAndStatusAndPaymentStatus(
@@ -295,6 +298,4 @@ public class CartService {
                 .map(this::mapToOrderResponse)
                 .toList();
     }
-
-
 }

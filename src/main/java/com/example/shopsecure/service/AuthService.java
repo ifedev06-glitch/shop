@@ -5,6 +5,8 @@ import com.example.shopsecure.dto.request.LoginRequest;
 import com.example.shopsecure.dto.request.RegisterRequest;
 import com.example.shopsecure.entity.User;
 import com.example.shopsecure.entity.Role;
+import com.example.shopsecure.exception.BusinessException;
+import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.UserRepository;
 import com.example.shopsecure.security.JwtService;
 import lombok.RequiredArgsConstructor;
@@ -27,7 +29,7 @@ public class AuthService {
     public AuthResponse register(RegisterRequest request) {
 
         if (userRepository.existsByEmail(request.getEmail())) {
-            throw new RuntimeException("Email already exists");
+            throw new BusinessException("Email already registered"); // ← was RuntimeException
         }
 
         User user = User.builder()
@@ -56,6 +58,8 @@ public class AuthService {
 
     public AuthResponse login(LoginRequest request) {
 
+        // BadCredentialsException is thrown automatically by authenticationManager
+        // if email/password is wrong — GlobalExceptionHandler already handles it
         authenticationManager.authenticate(
                 new UsernamePasswordAuthenticationToken(
                         request.getEmail(),
@@ -64,7 +68,7 @@ public class AuthService {
         );
 
         User user = userRepository.findByEmail(request.getEmail())
-                .orElseThrow(() -> new RuntimeException("User not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("User not found")); // ← was RuntimeException
 
         String token = jwtService.generateToken(user);
 

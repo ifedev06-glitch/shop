@@ -1,5 +1,6 @@
-package com.example.shopsecure.security;
+package com.example.shopsecure.filter;
 
+import com.example.shopsecure.security.JwtService;
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
@@ -58,6 +59,10 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                             );
                     authToken.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
                     SecurityContextHolder.getContext().setAuthentication(authToken);
+
+
+                    // for rate limiter, so each user can get personalized ip bucket//
+                    request.setAttribute("authenticatedUserId", username);
                 }
             }
         } catch (Exception e) {

@@ -1,4 +1,4 @@
-package com.example.shopsecure.security;
+package com.example.shopsecure.filter;
 
 import com.example.shopsecure.entity.IdempotencyRecord;
 import com.example.shopsecure.repository.IdempotencyRepository;

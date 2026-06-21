@@ -1,12 +1,12 @@
 package com.example.shopsecure.service;
 
+import com.example.shopsecure.exception.BusinessException;
 import com.resend.Resend;
 import com.resend.core.exception.ResendException;
 import org.springframework.beans.factory.annotation.Value;
 import com.resend.services.emails.model.CreateEmailOptions;
 import org.springframework.stereotype.Service;
 
-import java.util.List;
 @Service
 public class EmailService {
 
@@ -26,8 +26,7 @@ public class EmailService {
         try {
             resend.emails().send(request);
         } catch (ResendException e) {
-            throw new RuntimeException("Failed to send email: " + e.getMessage());
+            throw new BusinessException("Failed to send email: " + e.getMessage()); // ← changed
         }
     }
 }
-

@@ -3,9 +3,10 @@ package com.example.shopsecure.service;
 import com.example.shopsecure.dto.request.CreateProductRequest;
 import com.example.shopsecure.dto.response.ProductResponse;
 import com.example.shopsecure.entity.*;
+import com.example.shopsecure.exception.BusinessException;
+import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.*;
 import lombok.RequiredArgsConstructor;
-import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -25,20 +26,17 @@ public class ProductService {
     private final UserRepository userRepository;
     private final CloudinaryService cloudinaryService;
 
-
     public ProductResponse createProduct(CreateProductRequest request, List<MultipartFile> images) {
 
         User currentUser = getCurrentUser();
 
         Business business = businessRepository.findByOwner_Id(currentUser.getId())
-                .orElseThrow(() -> new RuntimeException("You need to create a business first"));
+                .orElseThrow(() -> new BusinessException("You need to create a business first")); // ← changed
 
-        // Validate category belongs to this vendor's business
         Category category = categoryRepository.findByIdAndBusiness_Id(
                         request.getCategoryId(), business.getId())
-                .orElseThrow(() -> new RuntimeException("Category not found in your store"));
+                .orElseThrow(() -> new ResourceNotFoundException("Category not found in your store")); // ← changed
 
-        // Upload images to Cloudinary
         List<String> imageUrls = new ArrayList<>();
         if (images != null && !images.isEmpty()) {
             for (MultipartFile image : images) {
@@ -67,7 +65,7 @@ public class ProductService {
         User currentUser = getCurrentUser();
 
         Business business = businessRepository.findByOwner_Id(currentUser.getId())
-                .orElseThrow(() -> new RuntimeException("You need to create a business first"));
+                .orElseThrow(() -> new BusinessException("You need to create a business first")); // ← changed
 
         return productRepository.findByBusiness_Id(business.getId())
                 .stream()
@@ -80,10 +78,10 @@ public class ProductService {
         User currentUser = getCurrentUser();
 
         Business business = businessRepository.findByOwner_Id(currentUser.getId())
-                .orElseThrow(() -> new RuntimeException("You need to create a business first"));
+                .orElseThrow(() -> new BusinessException("You need to create a business first")); // ← changed
 
         Product product = productRepository.findByIdAndBusiness_Id(productId, business.getId())
-                .orElseThrow(() -> new RuntimeException("Product not found in your store"));
+                .orElseThrow(() -> new ResourceNotFoundException("Product not found in your store")); // ← changed
 
         return toResponse(product);
     }
@@ -93,19 +91,16 @@ public class ProductService {
         User currentUser = getCurrentUser();
 
         Business business = businessRepository.findByOwner_Id(currentUser.getId())
-                .orElseThrow(() -> new RuntimeException("You need to create a business first"));
+                .orElseThrow(() -> new BusinessException("You need to create a business first")); // ← changed
 
         Product product = productRepository.findByIdAndBusiness_Id(productId, business.getId())
-                .orElseThrow(() -> new RuntimeException("Product not found in your store"));
+                .orElseThrow(() -> new ResourceNotFoundException("Product not found in your store")); // ← changed
 
-        // Validate category belongs to this vendor's business
         Category category = categoryRepository.findByIdAndBusiness_Id(
                         request.getCategoryId(), business.getId())
-                .orElseThrow(() -> new RuntimeException("Category not found in your store"));
+                .orElseThrow(() -> new ResourceNotFoundException("Category not found in your store")); // ← changed
 
-        // Upload new images if provided, otherwise keep existing
         if (images != null && !images.isEmpty()) {
-            // Delete old images from Cloudinary
             if (product.getImageUrls() != null) {
                 product.getImageUrls().forEach(cloudinaryService::delete);
             }
@@ -132,12 +127,11 @@ public class ProductService {
         User currentUser = getCurrentUser();
 
         Business business = businessRepository.findByOwner_Id(currentUser.getId())
-                .orElseThrow(() -> new RuntimeException("You need to create a business first"));
+                .orElseThrow(() -> new BusinessException("You need to create a business first")); // ← changed
 
         Product product = productRepository.findByIdAndBusiness_Id(productId, business.getId())
-                .orElseThrow(() -> new RuntimeException("Product not found in your store"));
+                .orElseThrow(() -> new ResourceNotFoundException("Product not found in your store")); // ← changed
 
-        // Delete images from Cloudinary
         if (product.getImageUrls() != null) {
             product.getImageUrls().forEach(cloudinaryService::delete);
         }
@@ -151,7 +145,7 @@ public class ProductService {
                 .getName();
 
         return userRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException("User not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("User not found")); // ← changed
     }
 
     private ProductResponse toResponse(Product product) {
@@ -167,6 +161,4 @@ public class ProductService {
                 .createdAt(product.getCreatedAt())
                 .build();
     }
-
-
 }

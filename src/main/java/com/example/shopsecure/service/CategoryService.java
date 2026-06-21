@@ -5,6 +5,8 @@ import com.example.shopsecure.dto.response.CategoryResponse;
 import com.example.shopsecure.entity.Business;
 import com.example.shopsecure.entity.Category;
 import com.example.shopsecure.entity.User;
+import com.example.shopsecure.exception.BusinessException;
+import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.BusinessRepository;
 import com.example.shopsecure.repository.CategoryRepository;
 import com.example.shopsecure.repository.UserRepository;
@@ -28,10 +30,10 @@ public class CategoryService {
         User currentUser = getCurrentUser();
 
         Business business = businessRepository.findByOwner_Id(currentUser.getId())
-                .orElseThrow(() -> new RuntimeException("You need to create a business first"));
+                .orElseThrow(() -> new BusinessException("You need to create a business first")); // ← changed
 
         if (categoryRepository.existsByNameAndBusiness_Id(request.getName(), business.getId())) {
-            throw new RuntimeException("Category already exists in your store");
+            throw new BusinessException("Category already exists in your store"); // ← changed
         }
 
         Category category = Category.builder()
@@ -49,7 +51,7 @@ public class CategoryService {
         User currentUser = getCurrentUser();
 
         Business business = businessRepository.findByOwner_Id(currentUser.getId())
-                .orElseThrow(() -> new RuntimeException("You need to create a business first"));
+                .orElseThrow(() -> new BusinessException("You need to create a business first")); // ← changed
 
         return categoryRepository.findByBusiness_Id(business.getId())
                 .stream()
@@ -63,7 +65,7 @@ public class CategoryService {
                 .getName();
 
         return userRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException("User not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("User not found")); // ← changed
     }
 
     private CategoryResponse toResponse(Category category) {

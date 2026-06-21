@@ -6,6 +6,7 @@ import com.example.shopsecure.dto.response.ProductResponse;
 import com.example.shopsecure.entity.Business;
 import com.example.shopsecure.entity.Category;
 import com.example.shopsecure.entity.Product;
+import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.BusinessRepository;
 import com.example.shopsecure.repository.CategoryRepository;
 import com.example.shopsecure.repository.ProductRepository;
@@ -32,7 +33,7 @@ public class StorefrontService {
     @Cacheable(value = "storefront", key = "#slug")
     public BusinessResponse getStorefront(String slug) {
         Business business = businessRepository.findByStorefrontSlug(slug)
-                .orElseThrow(() -> new RuntimeException("Store not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Store not found")); // ← changed
         return toBusinessResponse(business);
     }
 
@@ -48,13 +49,13 @@ public class StorefrontService {
     public ProductResponse getStoreProduct(String slug, Long productId) {
         return productRepository.findByIdAndSlugWithDetails(productId, slug)
                 .map(this::toProductResponse)
-                .orElseThrow(() -> new RuntimeException("Product not found in this store"));
+                .orElseThrow(() -> new ResourceNotFoundException("Product not found in this store")); // ← changed
     }
 
     @Cacheable(value = "storeCategories", key = "#slug")
     public List<CategoryResponse> getStoreCategories(String slug) {
         Business business = businessRepository.findByStorefrontSlug(slug)
-                .orElseThrow(() -> new RuntimeException("Store not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Store not found")); // ← changed
 
         return categoryRepository.findByBusiness_Id(business.getId())
                 .stream()

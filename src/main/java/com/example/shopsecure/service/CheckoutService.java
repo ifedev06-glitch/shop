@@ -1,6 +1,5 @@
 package com.example.shopsecure.service;
 
-import com.example.shopsecure.dto.request.CategoryRequest;
 import com.example.shopsecure.dto.request.CheckoutRequest;
 import com.example.shopsecure.dto.request.CheckoutSummaryRequest;
 import com.example.shopsecure.dto.request.UpdateOrderStatusRequest;
@@ -8,6 +7,8 @@ import com.example.shopsecure.dto.response.CheckoutSummaryResponse;
 import com.example.shopsecure.dto.response.OrderItemResponse;
 import com.example.shopsecure.dto.response.OrderResponse;
 import com.example.shopsecure.entity.*;
+import com.example.shopsecure.exception.BusinessException;
+import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.*;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
@@ -33,7 +34,7 @@ public class CheckoutService {
     private final EmailTemplateService emailTemplateService;
     private final EmailService emailService;
 
-    private static final BigDecimal DELIVERY_FEE = BigDecimal.valueOf(100);
+    private static final BigDecimal DELIVERY_FEE = BigDecimal.valueOf(4000);
 
     public CheckoutSummaryResponse calculateCheckout(
             CheckoutSummaryRequest request
@@ -45,13 +46,13 @@ public class CheckoutService {
                         request.getBusinessId()
                 )
                 .orElseThrow(() ->
-                        new RuntimeException("Cart not found"));
+                        new ResourceNotFoundException("Cart not found")); // ← changed
 
         List<CartItem> cartItems =
                 cartItemRepository.findByCart_Id(cart.getId());
 
         if (cartItems.isEmpty()) {
-            throw new RuntimeException("Cart is empty");
+            throw new BusinessException("Cart is empty"); // ← changed
         }
 
         validateStock(cartItems);
@@ -62,8 +63,7 @@ public class CheckoutService {
                 .mapToInt(CartItem::getQuantity)
                 .sum();
 
-        // Static fee for MVP
-        BigDecimal deliveryFee = BigDecimal.valueOf(100);
+        BigDecimal deliveryFee = BigDecimal.valueOf(4000);
 
         BigDecimal totalAmount =
                 subtotal.add(deliveryFee);
@@ -76,8 +76,6 @@ public class CheckoutService {
                 .build();
     }
 
-
-
     public OrderResponse checkout(CheckoutRequest request) {
 
         Cart cart = cartRepository
@@ -85,13 +83,13 @@ public class CheckoutService {
                         request.getSessionId(),
                         request.getBusinessId()
                 )
-                .orElseThrow(() -> new RuntimeException("Cart not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Cart not found")); // ← changed
 
         List<CartItem> cartItems =
                 cartItemRepository.findByCart_Id(cart.getId());
 
         if (cartItems.isEmpty()) {
-            throw new RuntimeException("Cart is empty");
+            throw new BusinessException("Cart is empty"); // ← changed
         }
 
         validateStock(cartItems);
@@ -147,13 +145,12 @@ public class CheckoutService {
             Product product = cartItem.getProduct();
 
             if (product.getStock() < cartItem.getQuantity()) {
-                throw new RuntimeException(
-                        product.getName() + " is out of stock"
+                throw new BusinessException(
+                        product.getName() + " is out of stock" // ← changed
                 );
             }
         }
     }
-
 
     public OrderResponse getOrderByOrderNumber(
             String orderNumber
@@ -161,7 +158,7 @@ public class CheckoutService {
 
         Order order = orderRepository
                 .findByOrderNumber(orderNumber)
-                .orElseThrow(() -> new RuntimeException("Order not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Order not found")); // ← changed
 
         return mapToResponse(order);
     }
@@ -174,15 +171,13 @@ public class CheckoutService {
         Order order = orderRepository
                 .findById(orderId)
                 .orElseThrow(() ->
-                        new RuntimeException("Order not found"));
+                        new ResourceNotFoundException("Order not found")); // ← changed
 
         order.setStatus(request.getStatus());
 
         Order saved = orderRepository.save(order);
         return mapToResponse(saved);
     }
-
-
 
     private OrderResponse mapToResponse(Order order) {
 
@@ -196,6 +191,7 @@ public class CheckoutService {
                                 .subtotal(item.getSubtotal())
                                 .build())
                         .toList();
+
         return OrderResponse.builder()
                 .orderId(order.getId())
                 .orderNumber(order.getOrderNumber())

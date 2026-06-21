@@ -3,6 +3,7 @@ package com.example.shopsecure.service;
 import com.example.shopsecure.dto.response.TransactionResponse;
 import com.example.shopsecure.entity.Business;
 import com.example.shopsecure.entity.User;
+import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.BusinessRepository;
 import com.example.shopsecure.repository.PaymentRepository;
 import com.example.shopsecure.repository.UserRepository;
@@ -79,9 +80,9 @@ public class TransactionService {
                 .getName();
 
         User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException("User not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("User not found")); // ← changed
 
         return businessRepository.findByOwner_Id(user.getId())
-                .orElseThrow(() -> new RuntimeException("Business not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Business not found")); // ← changed
     }
 }

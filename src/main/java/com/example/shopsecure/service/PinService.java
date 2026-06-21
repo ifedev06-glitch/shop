@@ -3,6 +3,8 @@ package com.example.shopsecure.service;
 import com.example.shopsecure.dto.request.ChangePinRequest;
 import com.example.shopsecure.dto.request.CreatePinRequest;
 import com.example.shopsecure.entity.User;
+import com.example.shopsecure.exception.BusinessException;
+import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.UserRepository;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -21,33 +23,33 @@ public class PinService {
         String email = SecurityContextHolder.getContext()
                 .getAuthentication().getName();
         return userRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException("User not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("User not found")); // ← changed
     }
 
     public void createPin(CreatePinRequest request) {
         if (!request.getPin().equals(request.getConfirmPin())) {
-            throw new RuntimeException("PINs do not match");
+            throw new BusinessException("PINs do not match"); // ← changed
         }
 
         User user = getCurrentUser();
 
         if (user.getTransactionPin() != null) {
-            throw new RuntimeException("PIN already exists. Use change PIN instead.");
+            throw new BusinessException("PIN already exists. Use change PIN instead."); // ← changed
         }
 
         user.setTransactionPin(passwordEncoder.encode(request.getPin()));
         userRepository.save(user);
     }
 
-    public void changePin(@Valid ChangePinRequest request){
+    public void changePin(@Valid ChangePinRequest request) {
         User user = getCurrentUser();
 
         if (!passwordEncoder.matches(request.getOldPin(), user.getTransactionPin())) {
-            throw new RuntimeException("Incorrect current PIN");
+            throw new BusinessException("Incorrect current PIN"); // ← changed
         }
 
         if (!request.getNewPin().equals(request.getConfirmNewPin())) {
-            throw new RuntimeException("New PINs do not match");
+            throw new BusinessException("New PINs do not match"); // ← changed
         }
 
         user.setTransactionPin(passwordEncoder.encode(request.getNewPin()));
@@ -58,11 +60,11 @@ public class PinService {
         User user = getCurrentUser();
 
         if (user.getTransactionPin() == null) {
-            throw new RuntimeException("No transaction PIN set. Please create one first.");
+            throw new BusinessException("No transaction PIN set. Please create one first."); // ← changed
         }
 
         if (!passwordEncoder.matches(rawPin, user.getTransactionPin())) {
-            throw new RuntimeException("Incorrect PIN");
+            throw new BusinessException("Incorrect PIN"); // ← changed
         }
     }
 
@@ -70,5 +72,4 @@ public class PinService {
         User user = getCurrentUser();
         return user.getTransactionPin() != null;
     }
-
 }

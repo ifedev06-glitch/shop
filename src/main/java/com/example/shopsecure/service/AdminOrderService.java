@@ -27,13 +27,11 @@ public class AdminOrderService {
     private final EmailService emailService;
     private final EmailTemplateService emailTemplateService;
 
-
     @Transactional(readOnly = true)
     public Page<OrderResponse> getAllOrders(int page) {
         Pageable pageable = PageRequest.of(page, 20, Sort.by("createdAt").descending());
         return orderRepository.findAll(pageable)
-                .map(this::mapToResponse);
-    }
+                .map(this::mapToResponse);}
 
     @Transactional(readOnly = true)
     public Page<OrderResponse> getPendingOrders(int page) {
@@ -144,9 +142,8 @@ public class AdminOrderService {
                         emailTemplateService.orderDeliveredBody(
                                 saved.getCustomerName(),
                                 saved.getOrderNumber(),
-                                "₦" + saved.getTotalAmount().toPlainString()
-                        )
-                );
+                                "₦" + saved.getTotalAmount().toPlainString()));
+
             } catch (Exception e) {
                 System.err.println("Failed to send delivered email to customer: " + e.getMessage());
             }

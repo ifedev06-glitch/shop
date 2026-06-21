@@ -2,6 +2,8 @@ package com.example.shopsecure.service;
 
 import com.example.shopsecure.dto.response.WalletResponse;
 import com.example.shopsecure.entity.*;
+import com.example.shopsecure.exception.BusinessException;
+import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.BusinessRepository;
 import com.example.shopsecure.repository.OrderRepository;
 import com.example.shopsecure.repository.UserRepository;
@@ -29,7 +31,7 @@ public class WalletService {
         Business business = businessRepository
                 .findByOwner_Id(currentUser.getId())
                 .orElseThrow(() ->
-                        new RuntimeException("Business not found"));
+                        new ResourceNotFoundException("Business not found")); // ← changed
         Wallet wallet = walletRepository
                 .findByBusiness_Id(business.getId())
                 .orElseGet(() -> createWallet(business));
@@ -38,7 +40,7 @@ public class WalletService {
 
     public WalletResponse addToProcessingBalance(Long orderId) {
         Order order = orderRepository.findByIdForUpdate(orderId)
-                .orElseThrow(() -> new RuntimeException("Order not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Order not found")); // ← changed
 
         Business business = order.getBusiness();
 
@@ -56,24 +58,24 @@ public class WalletService {
 
     public WalletResponse releaseFunds(Long orderId) {
         Order order = orderRepository.findByIdForUpdate(orderId)
-                .orElseThrow(() -> new RuntimeException("Order not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Order not found")); // ← changed
 
         if (Boolean.TRUE.equals(order.getSettled())) {
-            throw new RuntimeException("Funds already released");
+            throw new BusinessException("Funds already released"); // ← changed
         }
         if (order.getStatus() != OrderStatus.SHIPPED) {
-            throw new RuntimeException("Order has not been shipped yet");
+            throw new BusinessException("Order has not been shipped yet"); // ← changed
         }
 
         Business business = order.getBusiness();
 
         Wallet wallet = walletRepository
                 .findByBusiness_IdForUpdate(business.getId())
-                .orElseThrow(() -> new RuntimeException("Wallet not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Wallet not found")); // ← changed
 
         BigDecimal amount = order.getTotalAmount();
         if (wallet.getProcessingBalance().compareTo(amount) < 0) {
-            throw new RuntimeException("Insufficient processing balance");
+            throw new BusinessException("Insufficient processing balance"); // ← changed
         }
 
         wallet.setProcessingBalance(
@@ -95,7 +97,7 @@ public class WalletService {
                 .processingBalance(BigDecimal.ZERO)
                 .totalWithdrawn(BigDecimal.ZERO)
                 .status(WalletStatus.ACTIVE)
-                .currency("NGN") /// currency added last minute, will check later
+                .currency("NGN")
                 .createdAt(LocalDateTime.now())
                 .build();
         return walletRepository.save(wallet);
@@ -108,7 +110,7 @@ public class WalletService {
                 .getName();
         return userRepository.findByEmail(email)
                 .orElseThrow(() ->
-                        new RuntimeException("User not found"));
+                        new ResourceNotFoundException("User not found")); // ← changed
     }
 
     private WalletResponse mapToResponse(Wallet wallet) {

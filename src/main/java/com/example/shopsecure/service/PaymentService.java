@@ -7,10 +7,14 @@ import com.example.shopsecure.dto.response.OrderResponse;
 import com.example.shopsecure.entity.Order;
 import com.example.shopsecure.entity.Payment;
 import com.example.shopsecure.entity.PaymentStatus;
+import com.example.shopsecure.exception.BusinessException;
+import com.example.shopsecure.exception.PaymentException;
+import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.OrderRepository;
 import com.example.shopsecure.repository.PaymentRepository;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -18,6 +22,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 @Transactional
@@ -37,15 +42,16 @@ public class PaymentService {
         Order order = orderRepository
                 .findByOrderNumber(request.getOrderNumber())
                 .orElseThrow(() ->
-                        new RuntimeException("Order not found"));
+                        new ResourceNotFoundException("Order not found")); // ← changed
 
         if (order.getPaymentStatus().equals("PAID")) {
-            throw new RuntimeException("Order already paid");
+            throw new BusinessException("Order already paid"); // ← changed
         }
-        // Check if a pending payment already exists for this order
+
         Optional<Payment> existingPayment = paymentRepository
                 .findByOrder_IdAndStatus(
                         order.getId(), PaymentStatus.PENDING);
+
         if (existingPayment.isPresent()) {
             Payment payment = existingPayment.get();
             Map<String, Object> paystackData =
@@ -58,11 +64,14 @@ public class PaymentService {
                             (String) paystackData.get("authorization_url"))
                     .reference(payment.getReference())
                     .orderNumber(order.getOrderNumber())
-                    .build();}
+                    .build();
+        }
+
         String reference = "PAY-" + UUID.randomUUID()
                 .toString()
                 .substring(0, 8)
                 .toUpperCase();
+
         Payment payment = Payment.builder()
                 .order(order)
                 .reference(reference)
@@ -70,7 +79,9 @@ public class PaymentService {
                 .status(PaymentStatus.PENDING)
                 .createdAt(LocalDateTime.now())
                 .build();
+
         paymentRepository.save(payment);
+
         Map<String, Object> paystackData =
                 paystackService.initializeTransaction(
                         order.getEmail(),
@@ -85,20 +96,19 @@ public class PaymentService {
                 .orderNumber(order.getOrderNumber())
                 .build();
     }
-    // Step 2: Paystack calls this after customer pays
+
     public void handleWebhook(
             String payload,
             String paystackSignature,
             PaystackWebhookRequest webhookRequest
     ) {
-        // Always verify first — reject if signature doesn't match
         if (!paystackService.verifyWebhookSignature(
                 payload, paystackSignature)) {
-            throw new RuntimeException("Invalid webhook signature");
+            throw new PaymentException("Invalid webhook signature"); // ← changed
         }
 
         if (!"charge.success".equals(webhookRequest.getEvent())) {
-            return; // ignore other events for now
+            return;
         }
 
         String reference = webhookRequest.getData().getReference();
@@ -106,10 +116,10 @@ public class PaymentService {
         Payment payment = paymentRepository
                 .findByReference(reference)
                 .orElseThrow(() ->
-                        new RuntimeException("Payment not found"));
+                        new ResourceNotFoundException("Payment not found")); // ← changed
 
         if (payment.getStatus() == PaymentStatus.SUCCESS) {
-            return; // already processed, ignore duplicate webhook
+            return;
         }
 
         payment.setStatus(PaymentStatus.SUCCESS);
@@ -121,9 +131,8 @@ public class PaymentService {
         order.setPaymentStatus("PAID");
         orderRepository.save(order);
 
-        // Credit the business wallet
         walletService.addToProcessingBalance(order.getId());
-// Send customer confirmation email
+
         try {
             String customerHtml = emailTemplateService.customerOrderConfirmationBody(
                     order.getCustomerName(),
@@ -136,11 +145,9 @@ public class PaymentService {
                     customerHtml
             );
         } catch (Exception e) {
-            // log but don't fail the webhook
-            System.err.println("Failed to send customer email: " + e.getMessage());
+            log.error("Failed to send customer email: {}", e.getMessage()); // ← replaced System.err
         }
 
-// Send vendor new order email
         try {
             String sellerHtml = emailTemplateService.sellerNewOrderBody(
                     order.getCustomerName(),
@@ -153,16 +160,13 @@ public class PaymentService {
                     sellerHtml
             );
         } catch (Exception e) {
-            System.err.println("Failed to send vendor email: " + e.getMessage());
+            log.error("Failed to send vendor email: {}", e.getMessage()); // ← replaced System.err
         }
     }
 
     public OrderResponse getOrderByReference(String reference) {
         Payment payment = paymentRepository.findByReference(reference)
-                .orElseThrow(() -> new RuntimeException("Payment not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Payment not found")); // ← changed
         return checkoutService.getOrderByOrderNumber(payment.getOrder().getOrderNumber());
     }
-
-
-
 }

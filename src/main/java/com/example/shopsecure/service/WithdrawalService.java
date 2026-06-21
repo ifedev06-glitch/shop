@@ -3,6 +3,8 @@ package com.example.shopsecure.service;
 import com.example.shopsecure.dto.request.WithdrawalRequest;
 import com.example.shopsecure.dto.response.WithdrawalResponse;
 import com.example.shopsecure.entity.*;
+import com.example.shopsecure.exception.BusinessException;
+import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.*;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -12,13 +14,14 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 @Transactional
-@Slf4j
 public class WithdrawalService {
 
     private final WithdrawalRepository withdrawalRepository;
@@ -29,26 +32,25 @@ public class WithdrawalService {
     private final PaystackService paystackService;
     private final PinService pinService;
 
-
     public WithdrawalResponse withdraw(WithdrawalRequest request) {
 
         pinService.verifyPin(request.getPin());
         Business business = getCurrentBusiness();
 
         Wallet wallet = walletRepository.findByBusiness_IdForUpdate(business.getId())
-                .orElseThrow(() -> new RuntimeException("Wallet not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Wallet not found")); // ← changed
 
         BankAccount bankAccount = bankAccountRepository.findById(request.getBankAccountId())
-                .orElseThrow(() -> new RuntimeException("Bank account not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Bank account not found")); // ← changed
 
         if (!bankAccount.getBusiness().getId().equals(business.getId())) {
-            throw new RuntimeException("Unauthorized bank account");
+            throw new BusinessException("Unauthorized bank account"); // ← changed
         }
 
         BigDecimal amount = request.getAmount();
 
         if (wallet.getAvailableBalance().compareTo(amount) < 0) {
-            throw new RuntimeException("Insufficient available balance");
+            throw new BusinessException("Insufficient available balance"); // ← changed
         }
 
         wallet.setAvailableBalance(wallet.getAvailableBalance().subtract(amount));
@@ -88,13 +90,11 @@ public class WithdrawalService {
 
         } catch (Exception e) {
             log.error("Network issue initiating Paystack transfer for reference: {}", reference, e);
-
             withdrawal.setFailureReason("Initial network timeout: awaiting reconciliation.");
             withdrawalRepository.save(withdrawal);
         }
 
         return map(withdrawal);
-
     }
 
     // =========================
@@ -103,7 +103,7 @@ public class WithdrawalService {
     public void handleTransferSuccess(String transferCode) {
 
         Withdrawal withdrawal = withdrawalRepository.findByTransferCodeForUpdate(transferCode)
-                .orElseThrow(() -> new RuntimeException("Withdrawal not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Withdrawal not found")); // ← changed
 
         if (withdrawal.getStatus() == WithdrawalStatus.SUCCESS) return;
 
@@ -117,13 +117,13 @@ public class WithdrawalService {
     public void handleTransferFailed(String transferCode, String reason) {
 
         Withdrawal withdrawal = withdrawalRepository.findByTransferCodeForUpdate(transferCode)
-                .orElseThrow(() -> new RuntimeException("Withdrawal not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Withdrawal not found")); // ← changed
 
         if (withdrawal.getStatus() == WithdrawalStatus.FAILED) return;
 
         Wallet wallet = walletRepository.findByBusiness_IdForUpdate(
                 withdrawal.getBusiness().getId()
-        ).orElseThrow(() -> new RuntimeException("Wallet not found"));
+        ).orElseThrow(() -> new ResourceNotFoundException("Wallet not found")); // ← changed
 
         wallet.setAvailableBalance(
                 wallet.getAvailableBalance().add(withdrawal.getAmount())
@@ -142,10 +142,10 @@ public class WithdrawalService {
                 .getName();
 
         User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException("User not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("User not found")); // ← changed
 
         return businessRepository.findByOwner_Id(user.getId())
-                .orElseThrow(() -> new RuntimeException("Business not found"));
+                .orElseThrow(() -> new ResourceNotFoundException("Business not found")); // ← changed
     }
 
     private WithdrawalResponse map(Withdrawal w) {
@@ -159,7 +159,7 @@ public class WithdrawalService {
                 .build();
     }
 
-    public java.util.List<WithdrawalResponse> getMyWithdrawals() {
+    public List<WithdrawalResponse> getMyWithdrawals() {
 
         Business business = getCurrentBusiness();
 
@@ -169,5 +169,4 @@ public class WithdrawalService {
                 .map(this::map)
                 .toList();
     }
-
 }

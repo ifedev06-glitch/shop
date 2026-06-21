@@ -1,6 +1,7 @@
 package com.example.shopsecure.config;
-import com.example.shopsecure.security.JwtAuthFilter;
+import com.example.shopsecure.filter.JwtAuthFilter;
 import lombok.RequiredArgsConstructor;
+import com.example.shopsecure.config.RateLimitFilter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -30,10 +31,12 @@ public class SecurityConfig {
 
     private final JwtAuthFilter jwtAuthFilter;
     private final UserDetailsService userDetailsService;
+    private final RateLimitFilter rateLimitFilter;
 
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
+
                 .cors(cors -> {})
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
@@ -45,10 +48,12 @@ public class SecurityConfig {
                         .requestMatchers("/api/storefront/**", "/api/cart/**", "/api/checkout/**").permitAll()
                         .requestMatchers("/api/test/email").permitAll()
                         .requestMatchers("/orders/payment/verify/**").permitAll()
+                        .requestMatchers("/api/payments/initialize/**").permitAll()
                         .anyRequest().authenticated()
                 )
                 .authenticationProvider(authenticationProvider())
-                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+                .addFilterBefore(rateLimitFilter, JwtAuthFilter.class);
 
         return http.build();
     }

@@ -11,12 +11,14 @@ import com.example.shopsecure.repository.BusinessRepository;
 import com.example.shopsecure.repository.CategoryRepository;
 import com.example.shopsecure.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class CategoryService {
@@ -43,6 +45,7 @@ public class CategoryService {
                 .build();
 
         Category saved = categoryRepository.save(category);
+        log.info("Category created: name={}, businessId={}", saved.getName(), business.getId());
         return toResponse(saved);
     }
 

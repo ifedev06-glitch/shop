@@ -10,6 +10,7 @@ import com.example.shopsecure.exception.BusinessException;
 import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.*;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -19,6 +20,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.stream.Stream;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 @Transactional
@@ -99,6 +101,7 @@ public class CartService {
         }
 
         cartItemRepository.save(cartItem);
+        log.info("Item added to cart: sessionId={}, productId={}, quantity={}", request.getSessionId(), product.getId(), request.getQuantity());
 
         recalculateCart(cart);
 
@@ -165,6 +168,7 @@ public class CartService {
                 .orElseThrow(() -> new ResourceNotFoundException("Cart item not found")); // ← changed
 
         cartItemRepository.delete(cartItem);
+        log.info("Item removed from cart: sessionId={}, productId={}", sessionId, productId);
 
         recalculateCart(cart);
     }
@@ -175,6 +179,7 @@ public class CartService {
                 cartItemRepository.findByCart_Id(cart.getId());
 
         cartItemRepository.deleteAll(items);
+        log.info("Cart cleared: cartId={}, businessId={}", cart.getId(), cart.getBusiness().getId());
 
         cart.setTotalAmount(BigDecimal.ZERO);
 

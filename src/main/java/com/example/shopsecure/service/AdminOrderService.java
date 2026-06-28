@@ -1,13 +1,18 @@
 package com.example.shopsecure.service;
 
+import com.example.shopsecure.dto.request.CreateShippingRateRequest;
 import com.example.shopsecure.dto.request.UpdateOrderStatusRequest;
 import com.example.shopsecure.dto.response.OrderItemResponse;
 import com.example.shopsecure.dto.response.OrderResponse;
+import com.example.shopsecure.dto.response.ShippingAreaResponse;
 import com.example.shopsecure.entity.Order;
 import com.example.shopsecure.entity.OrderStatus;
+import com.example.shopsecure.entity.ShippingRate;
 import com.example.shopsecure.repository.OrderItemRepository;
 import com.example.shopsecure.repository.OrderRepository;
+import com.example.shopsecure.repository.ShippingRateRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -16,6 +21,7 @@ import java.util.List;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 @Transactional
@@ -26,6 +32,9 @@ public class AdminOrderService {
     private final WalletService walletService;
     private final EmailService emailService;
     private final EmailTemplateService emailTemplateService;
+    private final ShippingRateRepository shippingRateRepository;
+
+
 
     @Transactional(readOnly = true)
     public Page<OrderResponse> getAllOrders(int page) {
@@ -96,10 +105,12 @@ public class AdminOrderService {
         order.setStatus(request.getStatus());
 
         Order saved = orderRepository.save(order);
+        log.info("Order status updated: orderId={}, newStatus={}", orderId, request.getStatus());
 
         if (request.getStatus() == OrderStatus.SHIPPED
                 && !Boolean.TRUE.equals(saved.getSettled())) {
             walletService.releaseFunds(saved.getId());
+            log.info("Funds released for orderId={}", orderId);
         }
 
         // Shipped emails
@@ -114,8 +125,9 @@ public class AdminOrderService {
                                 saved.getPhoneNumber()
                         )
                 );
+                log.info("Shipped email sent to customer: orderId={}", orderId);
             } catch (Exception e) {
-                System.err.println("Failed to send shipped email to customer: " + e.getMessage());
+                log.error("Failed to send shipped email to customer: orderId={}", orderId, e);
             }
 
             try {
@@ -128,8 +140,9 @@ public class AdminOrderService {
                                 saved.getPhoneNumber()
                         )
                 );
+                log.info("Shipped email sent to vendor: orderId={}", orderId);
             } catch (Exception e) {
-                System.err.println("Failed to send shipped email to vendor: " + e.getMessage());
+                log.error("Failed to send shipped email to vendor: orderId={}", orderId, e);
             }
         }
 
@@ -143,9 +156,10 @@ public class AdminOrderService {
                                 saved.getCustomerName(),
                                 saved.getOrderNumber(),
                                 "₦" + saved.getTotalAmount().toPlainString()));
+                log.info("Delivered email sent to customer: orderId={}", orderId);
 
             } catch (Exception e) {
-                System.err.println("Failed to send delivered email to customer: " + e.getMessage());
+                log.error("Failed to send delivered email to customer: orderId={}", orderId, e);
             }
 
             try {
@@ -158,8 +172,9 @@ public class AdminOrderService {
                                 "₦" + saved.getTotalAmount().toPlainString()
                         )
                 );
+                log.info("Delivered email sent to vendor: orderId={}", orderId);
             } catch (Exception e) {
-                System.err.println("Failed to send delivered email to vendor: " + e.getMessage());
+                log.error("Failed to send delivered email to vendor: orderId={}", orderId, e);
             }
         }
 
@@ -194,4 +209,5 @@ public class AdminOrderService {
                 .createdAt(order.getCreatedAt())
                 .build();
     }
+
 }

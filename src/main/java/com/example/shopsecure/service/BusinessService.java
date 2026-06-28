@@ -9,12 +9,14 @@ import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.BusinessRepository;
 import com.example.shopsecure.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class BusinessService {
@@ -41,6 +43,7 @@ public class BusinessService {
                 .createdAt(LocalDateTime.now())
                 .build();
         Business saved = businessRepository.save(business);
+        log.info("Business created: id={}, name={}, slug={}", saved.getId(), saved.getBusinessName(), saved.getStorefrontSlug());
         return toResponse(saved);
     }
 
@@ -48,6 +51,7 @@ public class BusinessService {
         User currentUser = getCurrentUser();
         Business business = businessRepository.findByOwner_Id(currentUser.getId())
                 .orElseThrow(() -> new ResourceNotFoundException("No business found")); // ← changed
+        log.info("Business fetched: id={}, name={}", business.getId(), business.getBusinessName());
         return toResponse(business);
     }
 

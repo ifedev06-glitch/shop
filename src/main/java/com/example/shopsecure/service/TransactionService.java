@@ -9,6 +9,7 @@ import com.example.shopsecure.repository.PaymentRepository;
 import com.example.shopsecure.repository.UserRepository;
 import com.example.shopsecure.repository.WithdrawalRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
@@ -20,6 +21,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.stream.Stream;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class TransactionService {
@@ -71,6 +73,7 @@ public class TransactionService {
             return new PageImpl<>(List.of(), pageable, all.size());
         }
 
+        log.info("Transaction history fetched: businessId={}, totalTransactions={}", business.getId(), all.size());
         return new PageImpl<>(all.subList(start, end), pageable, all.size());
     }
 

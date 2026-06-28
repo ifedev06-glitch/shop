@@ -21,7 +21,6 @@ import java.util.UUID;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-@Transactional
 public class WithdrawalService {
 
     private final WithdrawalRepository withdrawalRepository;
@@ -35,32 +34,56 @@ public class WithdrawalService {
     public WithdrawalResponse withdraw(WithdrawalRequest request) {
 
         pinService.verifyPin(request.getPin());
+
+        // Pre-Paystack DB work in transaction
+        WithdrawalInitData data = initializeWithdrawal(request);
+
+        // Paystack call outside transaction
+        String transferCode = null;
+        try {
+            Map<String, Object> response = paystackService.initiateTransfer(
+                    data.recipientCode(),
+                    request.getAmount(),
+                    data.reference(),
+                    "Vendor Withdrawal"
+            );
+            transferCode = response != null && response.get("transfer_code") != null
+                    ? response.get("transfer_code").toString()
+                    : null;
+        } catch (Exception e) {
+            log.error("Network issue initiating Paystack transfer for reference: {}", data.reference(), e);
+        }
+
+        // Post-Paystack DB work in transaction
+        Withdrawal withdrawal = completeWithdrawal(data.reference(), transferCode);
+
+        return map(withdrawal);
+    }
+
+    @Transactional
+    protected WithdrawalInitData initializeWithdrawal(WithdrawalRequest request) {
         Business business = getCurrentBusiness();
 
         Wallet wallet = walletRepository.findByBusiness_IdForUpdate(business.getId())
-                .orElseThrow(() -> new ResourceNotFoundException("Wallet not found")); // ← changed
+                .orElseThrow(() -> new ResourceNotFoundException("Wallet not found"));
 
         BankAccount bankAccount = bankAccountRepository.findById(request.getBankAccountId())
-                .orElseThrow(() -> new ResourceNotFoundException("Bank account not found")); // ← changed
+                .orElseThrow(() -> new ResourceNotFoundException("Bank account not found"));
 
         if (!bankAccount.getBusiness().getId().equals(business.getId())) {
-            throw new BusinessException("Unauthorized bank account"); // ← changed
+            throw new BusinessException("Unauthorized bank account");
         }
 
         BigDecimal amount = request.getAmount();
 
         if (wallet.getAvailableBalance().compareTo(amount) < 0) {
-            throw new BusinessException("Insufficient available balance"); // ← changed
+            throw new BusinessException("Insufficient available balance");
         }
 
         wallet.setAvailableBalance(wallet.getAvailableBalance().subtract(amount));
         walletRepository.save(wallet);
 
-        String reference = "WD-" + UUID.randomUUID()
-                .toString()
-                .replace("-", "")
-                .substring(0, 12)
-                .toUpperCase();
+        String reference = "WD-" + UUID.randomUUID().toString().replace("-", "").toUpperCase();
 
         Withdrawal withdrawal = Withdrawal.builder()
                 .business(business)
@@ -71,59 +94,56 @@ public class WithdrawalService {
                 .build();
 
         withdrawalRepository.save(withdrawal);
+        log.info("Withdrawal initiated: amount={}, reference={}", amount, reference);
 
-        String transferCode = null;
-        try {
-            Map<String, Object> response = paystackService.initiateTransfer(
-                    bankAccount.getRecipientCode(),
-                    amount,
-                    reference,
-                    "Vendor Withdrawal"
-            );
-
-            transferCode = response != null && response.get("transfer_code") != null
-                    ? response.get("transfer_code").toString()
-                    : null;
-
-            withdrawal.setTransferCode(transferCode);
-            withdrawalRepository.save(withdrawal);
-
-        } catch (Exception e) {
-            log.error("Network issue initiating Paystack transfer for reference: {}", reference, e);
-            withdrawal.setFailureReason("Initial network timeout: awaiting reconciliation.");
-            withdrawalRepository.save(withdrawal);
-        }
-
-        return map(withdrawal);
+        return new WithdrawalInitData(reference, bankAccount.getRecipientCode());
     }
+
+    @Transactional
+    protected Withdrawal completeWithdrawal(String reference, String transferCode) {
+        Withdrawal withdrawal = withdrawalRepository.findByReference(reference)
+                .orElseThrow(() -> new ResourceNotFoundException("Withdrawal not found"));
+
+        if (transferCode != null) {
+            withdrawal.setTransferCode(transferCode);
+        } else {
+            withdrawal.setFailureReason("Initial network timeout: awaiting reconciliation.");
+        }
+        return withdrawalRepository.save(withdrawal);
+    }
+
+    private record WithdrawalInitData(String reference, String recipientCode) {}
 
     // =========================
     // SUCCESS WEBHOOK
     // =========================
+    @Transactional
     public void handleTransferSuccess(String transferCode) {
 
         Withdrawal withdrawal = withdrawalRepository.findByTransferCodeForUpdate(transferCode)
-                .orElseThrow(() -> new ResourceNotFoundException("Withdrawal not found")); // ← changed
+                .orElseThrow(() -> new ResourceNotFoundException("Withdrawal not found"));
 
         if (withdrawal.getStatus() == WithdrawalStatus.SUCCESS) return;
 
         withdrawal.setStatus(WithdrawalStatus.SUCCESS);
         withdrawalRepository.save(withdrawal);
+        log.info("Transfer success: transferCode={}", transferCode);
     }
 
     // =========================
     // FAILED WEBHOOK (REFUND)
     // =========================
+    @Transactional
     public void handleTransferFailed(String transferCode, String reason) {
 
         Withdrawal withdrawal = withdrawalRepository.findByTransferCodeForUpdate(transferCode)
-                .orElseThrow(() -> new ResourceNotFoundException("Withdrawal not found")); // ← changed
+                .orElseThrow(() -> new ResourceNotFoundException("Withdrawal not found"));
 
         if (withdrawal.getStatus() == WithdrawalStatus.FAILED) return;
 
         Wallet wallet = walletRepository.findByBusiness_IdForUpdate(
                 withdrawal.getBusiness().getId()
-        ).orElseThrow(() -> new ResourceNotFoundException("Wallet not found")); // ← changed
+        ).orElseThrow(() -> new ResourceNotFoundException("Wallet not found"));
 
         wallet.setAvailableBalance(
                 wallet.getAvailableBalance().add(withdrawal.getAmount())
@@ -133,6 +153,7 @@ public class WithdrawalService {
         withdrawal.setStatus(WithdrawalStatus.FAILED);
         withdrawal.setFailureReason(reason);
         withdrawalRepository.save(withdrawal);
+        log.warn("Transfer failed: transferCode={}, reason={}", transferCode, reason);
     }
 
     private Business getCurrentBusiness() {
@@ -142,10 +163,10 @@ public class WithdrawalService {
                 .getName();
 
         User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new ResourceNotFoundException("User not found")); // ← changed
+                .orElseThrow(() -> new ResourceNotFoundException("User not found"));
 
         return businessRepository.findByOwner_Id(user.getId())
-                .orElseThrow(() -> new ResourceNotFoundException("Business not found")); // ← changed
+                .orElseThrow(() -> new ResourceNotFoundException("Business not found"));
     }
 
     private WithdrawalResponse map(Withdrawal w) {

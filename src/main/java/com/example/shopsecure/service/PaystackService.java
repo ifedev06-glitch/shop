@@ -1,6 +1,7 @@
 package com.example.shopsecure.service;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
@@ -11,6 +12,7 @@ import javax.crypto.spec.SecretKeySpec;
 import java.math.BigDecimal;
 import java.util.*;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class PaystackService {
@@ -43,6 +45,8 @@ public class PaystackService {
         HttpEntity<Map<String, Object>> request =
                 new HttpEntity<>(body, headers);
 
+        log.info("Paystack transaction initialize: reference={}", reference);
+
         ResponseEntity<Map> response =
                 restTemplate.postForEntity(
                         BASE_URL + "/transaction/initialize",
@@ -65,6 +69,8 @@ public class PaystackService {
         headers.setBearerAuth(secretKey);
 
         HttpEntity<Void> request = new HttpEntity<>(headers);
+
+        log.info("Paystack account resolve");
 
         ResponseEntity<Map> response =
                 restTemplate.exchange(
@@ -103,6 +109,8 @@ public class PaystackService {
         HttpEntity<Map<String, Object>> request =
                 new HttpEntity<>(body, headers);
 
+        log.info("Paystack recipient created");
+
         ResponseEntity<Map> response =
                 restTemplate.postForEntity(
                         BASE_URL + "/transferrecipient",
@@ -136,6 +144,8 @@ public class PaystackService {
 
         HttpEntity<Map<String, Object>> request =
                 new HttpEntity<>(body, headers);
+
+        log.info("Paystack transfer initiated: reference={}", reference);
 
         ResponseEntity<Map> response =
                 restTemplate.postForEntity(

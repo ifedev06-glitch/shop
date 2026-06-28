@@ -39,4 +39,9 @@ public class CheckoutLink {
 
     private Boolean customLink;
 
+    private String shippingArea;
+    private BigDecimal shippingFee;
+
+    private BigDecimal subtotalAmount;
+
 }

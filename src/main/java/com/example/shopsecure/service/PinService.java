@@ -8,10 +8,12 @@ import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.UserRepository;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class PinService {
@@ -39,6 +41,7 @@ public class PinService {
 
         user.setTransactionPin(passwordEncoder.encode(request.getPin()));
         userRepository.save(user);
+        log.info("PIN created for user: {}", user.getEmail());
     }
 
     public void changePin(@Valid ChangePinRequest request) {
@@ -54,16 +57,20 @@ public class PinService {
 
         user.setTransactionPin(passwordEncoder.encode(request.getNewPin()));
         userRepository.save(user);
+        log.info("PIN changed for user: {}", user.getEmail());
     }
 
     public void verifyPin(String rawPin) {
         User user = getCurrentUser();
+        log.info("PIN verification for user: {}", user.getEmail());
 
         if (user.getTransactionPin() == null) {
+            log.warn("PIN verification failed: no PIN set for user: {}", user.getEmail());
             throw new BusinessException("No transaction PIN set. Please create one first."); // ← changed
         }
 
         if (!passwordEncoder.matches(rawPin, user.getTransactionPin())) {
+            log.warn("PIN verification failed: incorrect PIN for user: {}", user.getEmail());
             throw new BusinessException("Incorrect PIN"); // ← changed
         }
     }

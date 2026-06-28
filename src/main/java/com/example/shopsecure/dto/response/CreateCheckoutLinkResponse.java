@@ -15,4 +15,7 @@ public class CreateCheckoutLinkResponse {
     private String checkoutUrl;
     private BigDecimal totalAmount;
     private BigDecimal deliveryFee;
+
+    private BigDecimal subtotalAmount;
+
 }

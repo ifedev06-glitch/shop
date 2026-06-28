@@ -11,6 +11,7 @@ import com.example.shopsecure.repository.BusinessRepository;
 import com.example.shopsecure.repository.CategoryRepository;
 import com.example.shopsecure.repository.ProductRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.cache.annotation.CacheEvict;
 import org.springframework.cache.annotation.Cacheable;
@@ -19,6 +20,7 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class StorefrontService {
@@ -34,6 +36,7 @@ public class StorefrontService {
     public BusinessResponse getStorefront(String slug) {
         Business business = businessRepository.findByStorefrontSlug(slug)
                 .orElseThrow(() -> new ResourceNotFoundException("Store not found")); // ← changed
+        log.info("Storefront accessed: slug={}", slug);
         return toBusinessResponse(business);
     }
 

@@ -9,6 +9,7 @@ import com.example.shopsecure.repository.BusinessRepository;
 import com.example.shopsecure.repository.OrderRepository;
 import com.example.shopsecure.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
@@ -18,6 +19,7 @@ import org.springframework.stereotype.Service;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class OrderService {
 
     private final OrderRepository orderRepository;
@@ -30,9 +32,11 @@ public class OrderService {
 
         Pageable pageable = PageRequest.of(page, 10, Sort.by("createdAt").descending());
 
-        return orderRepository
+        Page<OrderResponse> result = orderRepository
                 .findOrdersByBusinessId(business.getId(), pageable)
                 .map(this::toResponse);
+        log.info("Order history fetched: businessId={}, page={}, totalElements={}", business.getId(), page, result.getTotalElements());
+        return result;
     }
 
     private Business getCurrentBusiness() {

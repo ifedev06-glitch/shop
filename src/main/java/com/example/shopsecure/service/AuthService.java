@@ -10,7 +10,9 @@ import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.UserRepository;
 import com.example.shopsecure.security.JwtService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.authentication.AuthenticationManager;
+import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
@@ -19,6 +21,7 @@ import java.time.LocalDateTime;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class AuthService {
 
     private final UserRepository userRepository;
@@ -29,6 +32,7 @@ public class AuthService {
     public AuthResponse register(RegisterRequest request) {
 
         if (userRepository.existsByEmail(request.getEmail())) {
+            log.warn("Registration failed - email already exists: email={}", request.getEmail());
             throw new BusinessException("Email already registered"); // ← was RuntimeException
         }
 
@@ -44,6 +48,7 @@ public class AuthService {
         userRepository.save(user);
 
         String token = jwtService.generateToken(user);
+        log.info("Merchant registered successfully: userId={}, email={}", user.getId(), user.getEmail());
 
         return AuthResponse.builder()
                 .token(token)
@@ -58,19 +63,23 @@ public class AuthService {
 
     public AuthResponse login(LoginRequest request) {
 
-        // BadCredentialsException is thrown automatically by authenticationManager
-        // if email/password is wrong — GlobalExceptionHandler already handles it
-        authenticationManager.authenticate(
-                new UsernamePasswordAuthenticationToken(
-                        request.getEmail(),
-                        request.getPassword()
-                )
-        );
+        try {
+            authenticationManager.authenticate(
+                    new UsernamePasswordAuthenticationToken(
+                            request.getEmail(),
+                            request.getPassword()
+                    )
+            );
+        } catch (BadCredentialsException e) {
+            log.warn("Login failed - invalid credentials: email={}", request.getEmail());
+            throw e;
+        }
 
         User user = userRepository.findByEmail(request.getEmail())
                 .orElseThrow(() -> new ResourceNotFoundException("User not found")); // ← was RuntimeException
 
         String token = jwtService.generateToken(user);
+        log.info("Merchant logged in successfully: userId={}, email={}", user.getId(), user.getEmail());
 
         return AuthResponse.builder()
                 .token(token)

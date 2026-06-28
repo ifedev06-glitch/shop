@@ -5,6 +5,7 @@ import com.example.shopsecure.dto.response.ProductResponse;
 import com.example.shopsecure.service.ProductService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -16,6 +17,7 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/vendor/products")
 @RequiredArgsConstructor
+@Slf4j
 public class ProductController {
 
     private final ProductService productService;
@@ -25,17 +27,20 @@ public class ProductController {
             @Valid @ModelAttribute CreateProductRequest request,
             @RequestPart(value = "images", required = false) List<MultipartFile> images) {
 
+        log.info("Product creation request: name={}", request.getName());
         return ResponseEntity.status(HttpStatus.CREATED)
                 .body(productService.createProduct(request, images));
     }
 
     @GetMapping
     public ResponseEntity<List<ProductResponse>> getMyProducts() {
+        log.info("Fetching vendor's products");
         return ResponseEntity.ok(productService.getMyProducts());
     }
 
     @GetMapping("/{productId}")
     public ResponseEntity<ProductResponse> getProductById(@PathVariable Long productId) {
+        log.info("Fetching product by id: productId={}", productId);
         return ResponseEntity.ok(productService.getProductById(productId));
     }
 
@@ -45,11 +50,13 @@ public class ProductController {
             @Valid @ModelAttribute CreateProductRequest request,
             @RequestPart(value = "images", required = false) List<MultipartFile> images) {
 
+        log.info("Product update request: productId={}", productId);
         return ResponseEntity.ok(productService.updateProduct(productId, request, images));
     }
 
     @DeleteMapping("/{productId}")
     public ResponseEntity<Void> deleteProduct(@PathVariable Long productId) {
+        log.info("Product delete request: productId={}", productId);
         productService.deleteProduct(productId);
         return ResponseEntity.noContent().build();
     }

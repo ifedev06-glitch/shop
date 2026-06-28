@@ -7,7 +7,11 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "orders")
+@Table(name = "orders", indexes = {
+        @Index(name = "idx_orders_order_number", columnList = "order_number"),
+        @Index(name = "idx_orders_business_id", columnList = "business_id"),
+        @Index(name = "idx_orders_status_payment_status", columnList = "status, payment_status")
+})
 @Getter
 @Setter
 @NoArgsConstructor
@@ -43,6 +47,9 @@ public class Order {
 
     private Boolean settled = false;
 
+    @Column(nullable = false)
+    private Boolean stockDeducted = false;
+
     private LocalDateTime createdAt;
 
     @Column(unique = true)
@@ -53,5 +60,8 @@ public class Order {
     @Column(columnDefinition = "TEXT")
     private String description;
 
+    private String shippingArea;
+
+    private BigDecimal shippingFee;
 
 }

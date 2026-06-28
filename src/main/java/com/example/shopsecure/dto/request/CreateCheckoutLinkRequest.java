@@ -1,6 +1,7 @@
 package com.example.shopsecure.dto.request;
 
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.Setter;
@@ -20,6 +21,8 @@ public class CreateCheckoutLinkRequest {
 
     @DecimalMin(value = "1.00", message = "Amount must be at least ₦1")
     private BigDecimal amount;
+
+    private BigDecimal subtotalAmount;
 
     private List<CheckoutLinkProductRequest> items;
 }

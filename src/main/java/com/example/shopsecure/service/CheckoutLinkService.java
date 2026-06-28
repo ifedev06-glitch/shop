@@ -5,8 +5,10 @@ import com.example.shopsecure.dto.request.CheckoutLinkProductRequest;
 import com.example.shopsecure.dto.request.CreateCheckoutLinkRequest;
 import com.example.shopsecure.dto.response.*;
 import com.example.shopsecure.entity.*;
+import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.*;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
@@ -18,9 +20,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
-@Transactional
 public class CheckoutLinkService {
 
     private final CheckoutLinkRepository checkoutLinkRepository;
@@ -32,18 +34,19 @@ public class CheckoutLinkService {
     private final OrderItemRepository orderItemRepository;
     private final PaymentRepository paymentRepository;
     private final PaystackService paystackService;
-
-    private static final BigDecimal DELIVERY_FEE = new BigDecimal("4000.00");
+    private final ShippingService shippingService;
 
     @Value("${app.base-url}")
     private String baseUrl;
 
+    // ---------------------------
+    // CREATE CHECKOUT LINK
+    // ---------------------------
+    @Transactional
     public CreateCheckoutLinkResponse createCheckoutLink(
             CreateCheckoutLinkRequest request
     ) {
-
         Business business = getCurrentBusiness();
-
         String slug = generateSlug();
 
         /*
@@ -57,33 +60,31 @@ public class CheckoutLinkService {
                 );
             }
 
-            BigDecimal totalWithDelivery = request.getAmount().add(DELIVERY_FEE);
-
             CheckoutLink checkoutLink = CheckoutLink.builder()
                     .slug(slug)
                     .business(business)
                     .title(request.getTitle())
                     .description(request.getDescription())
                     .customLink(true)
-                    .totalAmount(totalWithDelivery)
+                    .subtotalAmount(request.getAmount())
                     .active(true)
                     .createdAt(LocalDateTime.now())
                     .build();
 
             checkoutLinkRepository.save(checkoutLink);
+            log.info("Checkout link created: slug={}", slug);
 
             return CreateCheckoutLinkResponse.builder()
                     .slug(slug)
                     .checkoutUrl(baseUrl + "/checkout/" + slug)
-                    .deliveryFee(DELIVERY_FEE)
-                    .totalAmount(totalWithDelivery)
+                    .subtotalAmount(request.getAmount())
                     .build();
         }
 
         /*
          * PRODUCT CHECKOUT LINK
          */
-        BigDecimal totalAmount = BigDecimal.ZERO;
+        BigDecimal subtotal = BigDecimal.ZERO;
 
         CheckoutLink checkoutLink = CheckoutLink.builder()
                 .slug(slug)
@@ -93,8 +94,7 @@ public class CheckoutLinkService {
                 .createdAt(LocalDateTime.now())
                 .build();
 
-        CheckoutLink savedLink =
-                checkoutLinkRepository.save(checkoutLink);
+        CheckoutLink savedLink = checkoutLinkRepository.save(checkoutLink);
 
         for (CheckoutLinkProductRequest item : request.getItems()) {
 
@@ -106,11 +106,11 @@ public class CheckoutLinkService {
                             .orElseThrow(() ->
                                     new RuntimeException("Product not found"));
 
-            BigDecimal subtotal =
+            BigDecimal itemSubtotal =
                     product.getPrice()
                             .multiply(BigDecimal.valueOf(item.getQuantity()));
 
-            totalAmount = totalAmount.add(subtotal);
+            subtotal = subtotal.add(itemSubtotal);
 
             CheckoutLinkItem linkItem =
                     CheckoutLinkItem.builder()
@@ -118,28 +118,27 @@ public class CheckoutLinkService {
                             .product(product)
                             .quantity(item.getQuantity())
                             .price(product.getPrice())
-                            .subtotal(subtotal)
+                            .subtotal(itemSubtotal)
                             .build();
 
             checkoutLinkItemRepository.save(linkItem);
         }
 
-        BigDecimal totalWithDelivery = totalAmount.add(DELIVERY_FEE);
-
-        savedLink.setTotalAmount(totalWithDelivery);
+        savedLink.setSubtotalAmount(subtotal);
         checkoutLinkRepository.save(savedLink);
+        log.info("Checkout link created: slug={}", slug);
 
         return CreateCheckoutLinkResponse.builder()
                 .slug(slug)
                 .checkoutUrl(baseUrl + "/checkout/" + slug)
-                .deliveryFee(DELIVERY_FEE)
-                .totalAmount(totalWithDelivery)
+                .subtotalAmount(subtotal)
                 .build();
     }
 
-    public CheckoutLinkDetailsResponse getCheckoutLink(
-            String slug
-    ) {
+    // ---------------------------
+    // GET CHECKOUT LINK DETAILS
+    // ---------------------------
+    public CheckoutLinkDetailsResponse getCheckoutLink(String slug) {
 
         CheckoutLink checkoutLink =
                 checkoutLinkRepository.findBySlug(slug)
@@ -149,16 +148,12 @@ public class CheckoutLinkService {
         if (Boolean.TRUE.equals(checkoutLink.getCustomLink())) {
 
             return CheckoutLinkDetailsResponse.builder()
-                    .businessName(
-                            checkoutLink.getBusiness().getBusinessName()
-                    )
+                    .businessName(checkoutLink.getBusiness().getBusinessName())
                     .slug(checkoutLink.getSlug())
                     .title(checkoutLink.getTitle())
                     .description(checkoutLink.getDescription())
                     .customLink(true)
-                    .deliveryFee(DELIVERY_FEE)
-                    .subtotalAmount(checkoutLink.getTotalAmount().subtract(DELIVERY_FEE))
-                    .totalAmount(checkoutLink.getTotalAmount())
+                    .subtotalAmount(checkoutLink.getSubtotalAmount())
                     .items(List.of())
                     .build();
         }
@@ -180,23 +175,46 @@ public class CheckoutLinkService {
                         .toList();
 
         return CheckoutLinkDetailsResponse.builder()
-                .businessName(
-                        checkoutLink.getBusiness().getBusinessName()
-                )
+                .businessName(checkoutLink.getBusiness().getBusinessName())
                 .slug(checkoutLink.getSlug())
                 .customLink(false)
-                .deliveryFee(DELIVERY_FEE)
-                .subtotalAmount(checkoutLink.getTotalAmount().subtract(DELIVERY_FEE))
-                .totalAmount(checkoutLink.getTotalAmount())
+                .subtotalAmount(checkoutLink.getSubtotalAmount())
                 .items(items)
                 .build();
     }
 
+    // ---------------------------
+    // PAY FOR CHECKOUT LINK
+    // ---------------------------
     public CheckoutPaymentResponse payForCheckoutLink(
             String slug,
             CheckoutCustomerRequest request
     ) {
+        CheckoutPaymentData data = createOrderForCheckoutLink(slug, request);
 
+        Map<String, Object> paystackResponse =
+                paystackService.initializeTransaction(
+                        request.getEmail(),
+                        data.totalAmount(),
+                        data.reference()
+                );
+
+        log.info("Payment via checkout link: slug={}, orderNumber={}, reference={}", slug, data.orderNumber(), data.reference());
+
+        return CheckoutPaymentResponse.builder()
+                .orderNumber(data.orderNumber())
+                .reference(data.reference())
+                .authorizationUrl(
+                        paystackResponse.get("authorization_url").toString()
+                )
+                .build();
+    }
+
+    @Transactional
+    protected CheckoutPaymentData createOrderForCheckoutLink(
+            String slug,
+            CheckoutCustomerRequest request
+    ) {
         CheckoutLink checkoutLink =
                 checkoutLinkRepository.findBySlug(slug)
                         .orElseThrow(() ->
@@ -206,20 +224,42 @@ public class CheckoutLinkService {
             throw new RuntimeException("Checkout link is inactive");
         }
 
+        ShippingRate rate = shippingService.getShippingRate(request.getShippingArea());
+        BigDecimal shippingFee = rate.getFee();
+        BigDecimal totalAmount = checkoutLink.getSubtotalAmount().add(shippingFee);
+
+        // validate stock for product-based checkout links
+        if (!Boolean.TRUE.equals(checkoutLink.getCustomLink())) {
+            log.info("Stock validation started for checkout link: slug={}", slug);
+            List<CheckoutLinkItem> linkItems =
+                    checkoutLinkItemRepository
+                            .findByCheckoutLink_Id(checkoutLink.getId());
+            for (CheckoutLinkItem item : linkItems) {
+                Product product = productRepository.findByIdForUpdate(item.getProduct().getId())
+                        .orElseThrow(() -> new ResourceNotFoundException("Product not found"));
+                if (product.getStock() < item.getQuantity()) {
+                    log.warn("Stock validation failed: product='{}', requested={}, available={}",
+                            product.getName(), item.getQuantity(), product.getStock());
+                    throw new com.example.shopsecure.exception.BusinessException(
+                            "Product '" + product.getName() + "' only has " + product.getStock() + " items available."
+                    );
+                }
+            }
+            log.info("Stock validation successful for checkout link: slug={}", slug);
+        }
+
         String orderNumber =
-                "ORD-" +
-                        UUID.randomUUID()
-                                .toString()
-                                .substring(0, 8)
-                                .toUpperCase();
+                "ORD-" + UUID.randomUUID()
+                        .toString()
+                        .substring(0, 8)
+                        .toUpperCase();
 
         String reference =
-                "PAY-" +
-                        UUID.randomUUID()
-                                .toString()
-                                .replace("-", "")
-                                .substring(0, 12)
-                                .toUpperCase();
+                "PAY-" + UUID.randomUUID()
+                        .toString()
+                        .replace("-", "")
+                        .substring(0, 12)
+                        .toUpperCase();
 
         Order order = Order.builder()
                 .orderNumber(orderNumber)
@@ -229,7 +269,9 @@ public class CheckoutLinkService {
                 .email(request.getEmail())
                 .phoneNumber(request.getPhoneNumber())
                 .deliveryAddress(request.getDeliveryAddress())
-                .totalAmount(checkoutLink.getTotalAmount())
+                .shippingArea(request.getShippingArea())
+                .shippingFee(shippingFee)
+                .totalAmount(totalAmount)
                 .title(checkoutLink.getTitle())
                 .description(checkoutLink.getDescription())
                 .status(OrderStatus.PENDING)
@@ -239,18 +281,12 @@ public class CheckoutLinkService {
 
         Order savedOrder = orderRepository.save(order);
 
-        /*
-         * Only create OrderItems for product-based checkout links.
-         * Custom payment links have no products attached.
-         */
         if (!Boolean.TRUE.equals(checkoutLink.getCustomLink())) {
-
             List<CheckoutLinkItem> linkItems =
                     checkoutLinkItemRepository
                             .findByCheckoutLink_Id(checkoutLink.getId());
 
             for (CheckoutLinkItem item : linkItems) {
-
                 OrderItem orderItem =
                         OrderItem.builder()
                                 .order(savedOrder)
@@ -264,35 +300,20 @@ public class CheckoutLinkService {
             }
         }
 
-        /*
-         * Save payment record before redirecting to Paystack.
-         * Webhook will use the reference to locate this payment.
-         */
         Payment payment = Payment.builder()
                 .reference(reference)
                 .order(savedOrder)
-                .amount(checkoutLink.getTotalAmount())
+                .amount(totalAmount)
                 .status(PaymentStatus.PENDING)
                 .createdAt(LocalDateTime.now())
                 .build();
 
         paymentRepository.save(payment);
 
-        Map<String, Object> paystackResponse =
-                paystackService.initializeTransaction(
-                        request.getEmail(),
-                        checkoutLink.getTotalAmount(),
-                        reference
-                );
-
-        return CheckoutPaymentResponse.builder()
-                .orderNumber(savedOrder.getOrderNumber())
-                .reference(reference)
-                .authorizationUrl(
-                        paystackResponse.get("authorization_url").toString()
-                )
-                .build();
+        return new CheckoutPaymentData(savedOrder.getOrderNumber(), reference, totalAmount);
     }
+
+    private record CheckoutPaymentData(String orderNumber, String reference, BigDecimal totalAmount) {}
 
     private Business getCurrentBusiness() {
 
@@ -314,7 +335,6 @@ public class CheckoutLinkService {
     }
 
     private String generateSlug() {
-
         return UUID.randomUUID()
                 .toString()
                 .replace("-", "")

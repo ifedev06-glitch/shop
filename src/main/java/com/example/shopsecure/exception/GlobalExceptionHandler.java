@@ -66,6 +66,7 @@ public class GlobalExceptionHandler {
     // ── Wrong password / bad JWT ──────────────────────────────────────────────
     @ExceptionHandler(BadCredentialsException.class)
     public ResponseEntity<ErrorResponse> handleBadCredentials(BadCredentialsException ex) {
+        log.warn("Authentication failure: invalid email or password");
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ErrorResponse.builder()
                 .status(401)
                 .error("Invalid email or password")

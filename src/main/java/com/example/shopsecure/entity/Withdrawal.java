@@ -7,7 +7,10 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 @Entity
-@Table(name = "withdrawals")
+@Table(name = "withdrawals", indexes = {
+        @Index(name = "idx_withdrawals_business_created", columnList = "business_id, created_at"),
+        @Index(name = "idx_withdrawals_transfer_code", columnList = "transfer_code")
+})
 @Getter
 @Setter
 @NoArgsConstructor

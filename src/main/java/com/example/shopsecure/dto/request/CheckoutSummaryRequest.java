@@ -14,4 +14,8 @@ public class CheckoutSummaryRequest {
 
     @NotNull(message = "Business ID is required")
     private Long businessId;
+
+    @NotBlank(message = "Shipping area is required")
+    private String shippingArea;
+
 }

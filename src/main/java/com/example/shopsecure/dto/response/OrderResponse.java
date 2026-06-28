@@ -36,4 +36,7 @@ public class OrderResponse {
 
     private String title;
     private String description;
+
+    private String shippingArea;
+    private BigDecimal shippingFee;
 }

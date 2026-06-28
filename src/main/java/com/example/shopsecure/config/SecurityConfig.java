@@ -23,10 +23,14 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 import java.util.List;
 
+import lombok.extern.slf4j.Slf4j;
+import jakarta.annotation.PostConstruct;
+
 @Configuration
 @EnableWebSecurity
 @EnableMethodSecurity
 @RequiredArgsConstructor
+@Slf4j
 public class SecurityConfig {
 
     private final JwtAuthFilter jwtAuthFilter;
@@ -74,6 +78,11 @@ public class SecurityConfig {
     @Bean
     public PasswordEncoder passwordEncoder() {
         return new BCryptPasswordEncoder();
+    }
+
+    @PostConstruct
+    public void logStartup() {
+        log.info("Security configuration loaded: stateless sessions, JWT auth, CORS enabled");
     }
 
     @Bean

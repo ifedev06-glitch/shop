@@ -9,6 +9,7 @@ import com.example.shopsecure.repository.OrderRepository;
 import com.example.shopsecure.repository.UserRepository;
 import com.example.shopsecure.repository.WalletRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -16,6 +17,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 @Transactional
@@ -53,6 +55,7 @@ public class WalletService {
                 wallet.getProcessingBalance().add(amount));
 
         Wallet saved = walletRepository.save(wallet);
+        log.info("Amount added to processing balance: orderId={}, amount={}", orderId, amount);
         return mapToResponse(saved);
     }
 
@@ -86,6 +89,7 @@ public class WalletService {
         walletRepository.save(wallet);
         order.setSettled(true);
         orderRepository.save(order);
+        log.info("Funds released for orderId={}, amount={}", orderId, amount);
 
         return mapToResponse(wallet);
     }

@@ -28,4 +28,8 @@ public class CheckoutRequest {
 
     @NotBlank(message = "Delivery address is required")
     private String deliveryAddress;
+
+    @NotBlank(message = "Delivery address is required")
+    private String shippingArea;
+
 }

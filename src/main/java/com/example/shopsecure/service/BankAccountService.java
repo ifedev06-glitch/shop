@@ -10,6 +10,7 @@ import com.example.shopsecure.repository.BankAccountRepository;
 import com.example.shopsecure.repository.BusinessRepository;
 import com.example.shopsecure.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -17,6 +18,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
 import java.util.Map;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 @Transactional
@@ -78,6 +80,7 @@ public class BankAccountService {
 
         BankAccount saved =
                 bankAccountRepository.save(bankAccount);
+        log.info("Bank account saved/updated for business: businessId={}, accountNumber={}", business.getId(), saved.getAccountNumber());
 
         return mapToResponse(saved);
     }
@@ -86,9 +89,11 @@ public class BankAccountService {
 
         Business business = getCurrentBusiness();
 
-        return bankAccountRepository.findByBusiness_Id(business.getId())
+        BankAccountResponse response = bankAccountRepository.findByBusiness_Id(business.getId())
                 .map(this::mapToResponse)
                 .orElse(null);
+        log.info("Bank account fetched for businessId={}: {}", business.getId(), response != null ? "found" : "not found");
+        return response;
     }
 
     private Business getCurrentBusiness() {

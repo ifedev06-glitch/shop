@@ -7,10 +7,12 @@ import com.example.shopsecure.dto.response.CheckoutPaymentResponse;
 import com.example.shopsecure.dto.response.CreateCheckoutLinkResponse;
 import com.example.shopsecure.service.CheckoutLinkService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequiredArgsConstructor
+@Slf4j
 public class CheckoutLinkController {
 
     private final CheckoutLinkService checkoutLinkService;
@@ -19,6 +21,7 @@ public class CheckoutLinkController {
     public CreateCheckoutLinkResponse createCheckoutLink(
             @RequestBody CreateCheckoutLinkRequest request
     ) {
+        log.info("Creating checkout link for vendor");
         return checkoutLinkService.createCheckoutLink(request);
     }
 
@@ -26,6 +29,7 @@ public class CheckoutLinkController {
     public CheckoutLinkDetailsResponse getCheckoutLink(
             @PathVariable String slug
     ) {
+        log.info("Fetching checkout link: slug={}", slug);
         return checkoutLinkService.getCheckoutLink(slug);
     }
 
@@ -34,6 +38,7 @@ public class CheckoutLinkController {
             @PathVariable String slug,
             @RequestBody CheckoutCustomerRequest request
     ) {
+        log.info("Payment via checkout link: slug={}, customerEmail={}", slug, request.getEmail());
         return checkoutLinkService.payForCheckoutLink(
                 slug,
                 request

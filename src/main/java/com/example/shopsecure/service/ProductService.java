@@ -7,6 +7,7 @@ import com.example.shopsecure.exception.BusinessException;
 import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.repository.*;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -18,6 +19,7 @@ import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class ProductService {
 
     private final ProductRepository productRepository;
@@ -57,6 +59,7 @@ public class ProductService {
                 .build();
 
         Product saved = productRepository.save(product);
+        log.info("Product created: productId={}, businessId={}, name={}", saved.getId(), business.getId(), saved.getName());
         return toResponse(saved);
     }
 
@@ -67,10 +70,12 @@ public class ProductService {
         Business business = businessRepository.findByOwner_Id(currentUser.getId())
                 .orElseThrow(() -> new BusinessException("You need to create a business first")); // ← changed
 
-        return productRepository.findByBusiness_Id(business.getId())
+        List<ProductResponse> products = productRepository.findByBusiness_Id(business.getId())
                 .stream()
                 .map(this::toResponse)
                 .collect(Collectors.toList());
+        log.info("Fetched {} products for businessId={}", products.size(), business.getId());
+        return products;
     }
 
     public ProductResponse getProductById(Long productId) {
@@ -119,6 +124,7 @@ public class ProductService {
         product.setCategory(category);
 
         Product saved = productRepository.save(product);
+        log.info("Product updated: productId={}, businessId={}", saved.getId(), business.getId());
         return toResponse(saved);
     }
 
@@ -137,6 +143,7 @@ public class ProductService {
         }
 
         productRepository.delete(product);
+        log.info("Product deleted: productId={}, businessId={}", productId, business.getId());
     }
 
     private User getCurrentUser() {

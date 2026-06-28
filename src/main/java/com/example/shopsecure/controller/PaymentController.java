@@ -9,6 +9,7 @@ import com.example.shopsecure.service.PaystackService;
 import com.example.shopsecure.service.TransactionService;
 import com.example.shopsecure.service.WithdrawalService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -19,6 +20,7 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/payments")
 @RequiredArgsConstructor
+@Slf4j
 public class PaymentController {
 
     private final PaymentService paymentService;
@@ -31,6 +33,7 @@ public class PaymentController {
     public ResponseEntity<InitializePaymentResponse> initializePayment(
             @RequestBody InitializePaymentRequest request
     ) {
+        log.info("Payment initialization: orderNumber={}", request.getOrderNumber());
         return ResponseEntity.ok(
                 paymentService.initializePayment(request));
     }
@@ -39,6 +42,7 @@ public class PaymentController {
     public ResponseEntity<Page<TransactionResponse>> getTransactions(
             @RequestParam(defaultValue = "0") int page
     ) {
+        log.info("Fetching transaction history: page={}", page);
         return ResponseEntity.ok(transactionService.getTransactionHistory(page, 10));
     }
 
@@ -52,28 +56,39 @@ public class PaymentController {
                 objectMapper.readValue(payload, PaystackWebhookRequest.class);
 
         String event = webhookRequest.getEvent();
+        log.info("Payment webhook received: event={}", event);
 
         switch (event) {
-            case "charge.success" ->
-                    paymentService.handleWebhook(payload, signature, webhookRequest);
+            case "charge.success" -> {
+                log.info("Processing charge.success webhook");
+                paymentService.handleWebhook(payload, signature, webhookRequest);
+            }
             case "transfer.success" -> {
-                if (!paystackService.verifyWebhookSignature(payload, signature))
+                log.info("Processing transfer.success webhook: transferCode={}",
+                        webhookRequest.getData().getTransferCode());
+                if (!paystackService.verifyWebhookSignature(payload, signature)) {
+                    log.warn("Invalid webhook signature for transfer.success");
                     throw new RuntimeException("Invalid webhook signature");
+                }
                 withdrawalService.handleTransferSuccess(
                         webhookRequest.getData().getTransferCode()
                 );
             }
 
             case "transfer.failed", "transfer.reversed" -> {
-                if (!paystackService.verifyWebhookSignature(payload, signature))
+                log.warn("Processing {} webhook: transferCode={}",
+                        event, webhookRequest.getData().getTransferCode());
+                if (!paystackService.verifyWebhookSignature(payload, signature)) {
+                    log.warn("Invalid webhook signature for {}", event);
                     throw new RuntimeException("Invalid webhook signature");
+                }
                 withdrawalService.handleTransferFailed(
                         webhookRequest.getData().getTransferCode(),
                         webhookRequest.getData().getReason()
                 );
             }
 
-            default -> { /* ignore unhandled events */ }
+            default -> log.info("Ignoring unhandled webhook event: {}", event);
         }
 
         return ResponseEntity.ok().build();

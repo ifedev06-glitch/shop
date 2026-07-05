@@ -1,5 +1,6 @@
 package com.example.shopsecure.exception;
 
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -8,6 +9,8 @@ import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
 
 import java.time.LocalDateTime;
 import java.util.HashMap;
@@ -17,12 +20,23 @@ import java.util.Map;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    private String requestPath() {
+        ServletRequestAttributes attrs = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
+        if (attrs != null) {
+            HttpServletRequest request = attrs.getRequest();
+            return request.getMethod() + " " + request.getRequestURI();
+        }
+        return "unknown";
+    }
+
     // ── Validation errors (@Valid failures) ──────────────────────────────────
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ErrorResponse> handleValidation(MethodArgumentNotValidException ex) {
         Map<String, String> fieldErrors = new HashMap<>();
         ex.getBindingResult().getFieldErrors()
                 .forEach(err -> fieldErrors.put(err.getField(), err.getDefaultMessage()));
+
+        log.warn("Validation failed: path={}, errors={}", requestPath(), fieldErrors);
 
         return ResponseEntity.badRequest().body(ErrorResponse.builder()
                 .status(400)
@@ -35,6 +49,7 @@ public class GlobalExceptionHandler {
     // ── 404s ─────────────────────────────────────────────────────────────────
     @ExceptionHandler(ResourceNotFoundException.class)
     public ResponseEntity<ErrorResponse> handleNotFound(ResourceNotFoundException ex) {
+        log.warn("Resource not found: path={}, message={}", requestPath(), ex.getMessage());
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ErrorResponse.builder()
                 .status(404)
                 .error(ex.getMessage())
@@ -45,6 +60,7 @@ public class GlobalExceptionHandler {
     // ── Business rule violations ──────────────────────────────────────────────
     @ExceptionHandler(BusinessException.class)
     public ResponseEntity<ErrorResponse> handleBusiness(BusinessException ex) {
+        log.warn("Business rule violation: path={}, message={}", requestPath(), ex.getMessage());
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ErrorResponse.builder()
                 .status(400)
                 .error(ex.getMessage())
@@ -55,7 +71,7 @@ public class GlobalExceptionHandler {
     // ── Payment specific ──────────────────────────────────────────────────────
     @ExceptionHandler(PaymentException.class)
     public ResponseEntity<ErrorResponse> handlePayment(PaymentException ex) {
-        log.error("Payment error: {}", ex.getMessage());
+        log.error("Payment error: path={}, message={}", requestPath(), ex.getMessage());
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ErrorResponse.builder()
                 .status(400)
                 .error(ex.getMessage())
@@ -66,7 +82,7 @@ public class GlobalExceptionHandler {
     // ── Wrong password / bad JWT ──────────────────────────────────────────────
     @ExceptionHandler(BadCredentialsException.class)
     public ResponseEntity<ErrorResponse> handleBadCredentials(BadCredentialsException ex) {
-        log.warn("Authentication failure: invalid email or password");
+        log.warn("Authentication failure: path={}", requestPath());
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ErrorResponse.builder()
                 .status(401)
                 .error("Invalid email or password")
@@ -77,6 +93,7 @@ public class GlobalExceptionHandler {
     // ── @PreAuthorize failures ────────────────────────────────────────────────
     @ExceptionHandler(AccessDeniedException.class)
     public ResponseEntity<ErrorResponse> handleAccessDenied(AccessDeniedException ex) {
+        log.warn("Access denied: path={}", requestPath());
         return ResponseEntity.status(HttpStatus.FORBIDDEN).body(ErrorResponse.builder()
                 .status(403)
                 .error("You do not have permission to perform this action")
@@ -87,7 +104,7 @@ public class GlobalExceptionHandler {
     // ── Catch-all ─────────────────────────────────────────────────────────────
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleGeneral(Exception ex) {
-        log.error("Unhandled exception: {}", ex.getMessage(), ex);
+        log.error("Unhandled exception: path={}, message={}", requestPath(), ex.getMessage(), ex);
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(ErrorResponse.builder()
                 .status(500)
                 .error("Something went wrong. Please try again.")

@@ -17,7 +17,9 @@ public class ProductResponse {
     private String name;
     private String description;
     private BigDecimal price;
+    private BigDecimal costPrice;
     private Integer stock;
+    private Integer lowStockThreshold;
     private List<String> imageUrls;
     private String categoryName;
     private String businessName;

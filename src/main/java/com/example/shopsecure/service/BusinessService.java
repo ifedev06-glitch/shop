@@ -13,6 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDateTime;
 
@@ -23,15 +24,22 @@ public class BusinessService {
 
     private final BusinessRepository businessRepository;
     private final UserRepository userRepository;
+    private final CloudinaryService cloudinaryService;
 
     @Value("${app.base-url}")
     private String baseUrl;
 
-    public BusinessResponse createBusiness(CreateBusinessRequest request) {
+    public BusinessResponse createBusiness(CreateBusinessRequest request, MultipartFile logo) {
         User currentUser = getCurrentUser();
         if (businessRepository.findByOwner_Id(currentUser.getId()).isPresent()) {
-            throw new BusinessException("You already have a business"); // ← changed
+            throw new BusinessException("You already have a business");
         }
+
+        String logoUrl = null;
+        if (logo != null && !logo.isEmpty()) {
+            logoUrl = cloudinaryService.upload(logo, "shopsecure/logos");
+        }
+
         String slug = generateSlug(request.getBusinessName());
         Business business = Business.builder()
                 .businessName(request.getBusinessName())
@@ -39,6 +47,7 @@ public class BusinessService {
                 .description(request.getDescription())
                 .phoneNumber(request.getPhoneNumber())
                 .address(request.getAddress())
+                .logoUrl(logoUrl)
                 .owner(currentUser)
                 .createdAt(LocalDateTime.now())
                 .build();
@@ -84,6 +93,7 @@ public class BusinessService {
                 .description(business.getDescription())
                 .phoneNumber(business.getPhoneNumber())
                 .address(business.getAddress())
+                .logoUrl(business.getLogoUrl())
                 .createdAt(business.getCreatedAt())
                 .build();
     }

@@ -29,7 +29,6 @@ public class AdminOrderService {
 
     private final OrderRepository orderRepository;
     private final OrderItemRepository orderItemRepository;
-    private final WalletService walletService;
     private final EmailService emailService;
     private final EmailTemplateService emailTemplateService;
     private final ShippingRateRepository shippingRateRepository;
@@ -106,12 +105,6 @@ public class AdminOrderService {
 
         Order saved = orderRepository.save(order);
         log.info("Order status updated: orderId={}, newStatus={}", orderId, request.getStatus());
-
-        if (request.getStatus() == OrderStatus.SHIPPED
-                && !Boolean.TRUE.equals(saved.getSettled())) {
-            walletService.releaseFunds(saved.getId());
-            log.info("Funds released for orderId={}", orderId);
-        }
 
         // Shipped emails
         if (request.getStatus() == OrderStatus.SHIPPED) {

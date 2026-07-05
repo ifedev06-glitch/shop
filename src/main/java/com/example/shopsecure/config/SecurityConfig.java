@@ -1,5 +1,6 @@
 package com.example.shopsecure.config;
 import com.example.shopsecure.filter.JwtAuthFilter;
+import com.example.shopsecure.filter.RequestLoggingFilter;
 import lombok.RequiredArgsConstructor;
 import com.example.shopsecure.config.RateLimitFilter;
 import org.springframework.context.annotation.Bean;
@@ -33,6 +34,7 @@ import jakarta.annotation.PostConstruct;
 @Slf4j
 public class SecurityConfig {
 
+    private final RequestLoggingFilter requestLoggingFilter;
     private final JwtAuthFilter jwtAuthFilter;
     private final UserDetailsService userDetailsService;
     private final RateLimitFilter rateLimitFilter;
@@ -40,8 +42,7 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
         http
-
-                .cors(cors -> {})
+                .cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
@@ -53,11 +54,14 @@ public class SecurityConfig {
                         .requestMatchers("/api/test/email").permitAll()
                         .requestMatchers("/orders/payment/verify/**").permitAll()
                         .requestMatchers("/api/payments/initialize/**").permitAll()
+                        .requestMatchers("/api/checkout-links/**").permitAll()
+                        .requestMatchers("/api/public/**").permitAll()
                         .anyRequest().authenticated()
                 )
                 .authenticationProvider(authenticationProvider())
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
-                .addFilterBefore(rateLimitFilter, JwtAuthFilter.class);
+                .addFilterBefore(rateLimitFilter, JwtAuthFilter.class)
+                .addFilterBefore(requestLoggingFilter, RateLimitFilter.class);
 
         return http.build();
     }
@@ -88,7 +92,10 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOrigins(List.of("http://localhost:3000", "https://shopsecure-frontend.vercel.app"));
+        configuration.setAllowedOrigins(List.of(
+                "http://localhost:3000",
+                "https://www.shopsecure.app"
+        ));
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("*"));
         configuration.setAllowCredentials(true);

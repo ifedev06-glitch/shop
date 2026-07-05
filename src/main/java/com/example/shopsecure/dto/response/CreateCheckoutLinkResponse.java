@@ -18,4 +18,6 @@ public class CreateCheckoutLinkResponse {
 
     private BigDecimal subtotalAmount;
 
+    private BigDecimal discount;
+
 }

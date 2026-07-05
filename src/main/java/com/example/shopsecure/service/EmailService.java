@@ -19,7 +19,7 @@ public class EmailService {
         Resend resend = new Resend(apiKey);
 
         CreateEmailOptions request = CreateEmailOptions.builder()
-                .from("ShopSecure <onboarding@resend.dev>")
+                .from("ShopSecure <support@shopsecure.app>")
                 .to(to)
                 .subject(subject)
                 .html(htmlContent)

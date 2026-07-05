@@ -24,5 +24,7 @@ public class CreateCheckoutLinkRequest {
 
     private BigDecimal subtotalAmount;
 
+    private BigDecimal discount;
+
     private List<CheckoutLinkProductRequest> items;
 }

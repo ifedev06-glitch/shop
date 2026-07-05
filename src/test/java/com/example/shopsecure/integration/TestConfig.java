@@ -17,14 +17,6 @@ public class TestConfig {
     @Bean
     @Primary
     public RateLimitFilter rateLimitFilter() {
-        return new RateLimitFilter() {
-            @Override
-            protected void doFilterInternal(HttpServletRequest request,
-                                            HttpServletResponse response,
-                                            FilterChain chain)
-                    throws ServletException, IOException {
-                chain.doFilter(request, response);
-            }
-        };
+        return new RateLimitFilter();
     }
 }

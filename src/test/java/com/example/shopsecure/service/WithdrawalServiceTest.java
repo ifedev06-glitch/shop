@@ -17,11 +17,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.Mock;
-import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.security.core.Authentication;
-import org.springframework.security.core.context.SecurityContext;
-import org.springframework.security.core.context.SecurityContextHolder;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -31,11 +27,9 @@ import java.util.Optional;
 @ExtendWith(MockitoExtension.class)
 class WithdrawalServiceTest {
 
+    @Mock WithdrawalTransactionService withdrawalTransactionService;
     @Mock WithdrawalRepository withdrawalRepository;
     @Mock WalletRepository walletRepository;
-    @Mock BankAccountRepository bankAccountRepository;
-    @Mock BusinessRepository businessRepository;
-    @Mock UserRepository userRepository;
     @Mock PaystackService paystackService;
     @Mock PinService pinService;
 
@@ -53,8 +47,8 @@ class WithdrawalServiceTest {
     @BeforeEach
     void setUp() {
         withdrawalService = new WithdrawalService(
-                withdrawalRepository, walletRepository, bankAccountRepository,
-                businessRepository, userRepository, paystackService, pinService);
+                withdrawalTransactionService, withdrawalRepository, walletRepository,
+                null, null, null, paystackService, pinService);
 
         seller = User.builder().id(1L).email("vendor@example.com")
                 .transactionPin("$2a$10$encrypted").build();
@@ -64,8 +58,7 @@ class WithdrawalServiceTest {
 
         wallet = Wallet.builder()
                 .id(1L).business(business)
-                .availableBalance(new BigDecimal("50000"))
-                .processingBalance(BigDecimal.ZERO)
+                .balance(new BigDecimal("50000"))
                 .currency("NGN").status(WalletStatus.ACTIVE)
                 .build();
 
@@ -80,13 +73,6 @@ class WithdrawalServiceTest {
         request.setPin("1234");
     }
 
-    private void mockSecurityContext() {
-        Authentication auth = mock(Authentication.class);
-        when(auth.getName()).thenReturn("vendor@example.com");
-        SecurityContext ctx = mock(SecurityContext.class);
-        when(ctx.getAuthentication()).thenReturn(auth);
-    }
-
     // =====================
     // WITHDRAW
     // =====================
@@ -95,201 +81,127 @@ class WithdrawalServiceTest {
     void withdraw_success_deductsWalletAndCreatesWithdrawal() {
         doNothing().when(pinService).verifyPin("1234");
 
-        try (MockedStatic<SecurityContextHolder> holder = mockStatic(SecurityContextHolder.class)) {
-            Authentication auth = mock(Authentication.class);
-            when(auth.getName()).thenReturn("vendor@example.com");
-            SecurityContext ctx = mock(SecurityContext.class);
-            when(ctx.getAuthentication()).thenReturn(auth);
-            holder.when(SecurityContextHolder::getContext).thenReturn(ctx);
+        WithdrawalTransactionService.WithdrawalInitData initData =
+                new WithdrawalTransactionService.WithdrawalInitData("WD-REF123", "RCP_test123");
 
-            when(userRepository.findByEmail("vendor@example.com"))
-                    .thenReturn(Optional.of(seller));
-            when(businessRepository.findByOwner_Id(1L))
-                    .thenReturn(Optional.of(business));
-            when(walletRepository.findByBusiness_IdForUpdate(1L))
-                    .thenReturn(Optional.of(wallet));
-            when(bankAccountRepository.findById(1L))
-                    .thenReturn(Optional.of(bankAccount));
-            when(walletRepository.save(any(Wallet.class)))
-                    .thenAnswer(inv -> inv.getArgument(0));
-            when(withdrawalRepository.save(any(Withdrawal.class)))
-                    .thenAnswer(inv -> inv.getArgument(0));
-            when(paystackService.initiateTransfer(
-                    eq("RCP_test123"), eq(new BigDecimal("10000")),
-                    anyString(), eq("Vendor Withdrawal")))
-                    .thenReturn(Map.of("transfer_code", "TRF_test123"));
-            when(withdrawalRepository.findByReference(anyString()))
-                    .thenAnswer(inv -> {
-                        String ref = inv.getArgument(0);
-                        return Optional.of(Withdrawal.builder()
-                                .id(1L).business(business)
-                                .amount(new BigDecimal("10000"))
-                                .reference(ref)
-                                .status(WithdrawalStatus.PENDING)
-                                .createdAt(LocalDateTime.now()).build());
-                    });
+        when(withdrawalTransactionService.initializeWithdrawal(any(WithdrawalRequest.class)))
+                .thenReturn(initData);
+        when(paystackService.initiateTransfer(
+                eq("RCP_test123"), eq(new BigDecimal("10000")),
+                eq("WD-REF123"), eq("Vendor Withdrawal")))
+                .thenReturn(Map.of("transfer_code", "TRF_test123"));
 
-            WithdrawalResponse response = withdrawalService.withdraw(request);
+        Withdrawal savedWithdrawal = Withdrawal.builder()
+                .id(1L).business(business)
+                .amount(new BigDecimal("10000"))
+                .reference("WD-REF123")
+                .transferCode("TRF_test123")
+                .status(WithdrawalStatus.PENDING)
+                .createdAt(LocalDateTime.now()).build();
 
-            assertNotNull(response);
-            assertEquals(0, new BigDecimal("10000").compareTo(response.getAmount()));
-            assertTrue(response.getReference().startsWith("WD-"));
-            assertEquals("TRF_test123", response.getTransferCode());
+        when(withdrawalTransactionService.completeWithdrawal("WD-REF123", "TRF_test123"))
+                .thenReturn(savedWithdrawal);
 
-            verify(walletRepository).save(walletCaptor.capture());
-            assertEquals(0, new BigDecimal("40000")
-                    .compareTo(walletCaptor.getValue().getAvailableBalance()));
+        WithdrawalResponse response = withdrawalService.withdraw(request);
 
-            verify(withdrawalRepository, times(2)).save(any(Withdrawal.class));
-        }
+        assertNotNull(response);
+        assertEquals(0, new BigDecimal("10000").compareTo(response.getAmount()));
+        assertEquals("WD-REF123", response.getReference());
+        assertEquals("TRF_test123", response.getTransferCode());
+
+        verify(withdrawalTransactionService).initializeWithdrawal(request);
+        verify(paystackService).initiateTransfer(
+                eq("RCP_test123"), eq(new BigDecimal("10000")),
+                eq("WD-REF123"), eq("Vendor Withdrawal"));
+        verify(withdrawalTransactionService).completeWithdrawal("WD-REF123", "TRF_test123");
     }
 
     @Test
     void withdraw_insufficientBalance_throws() {
-        wallet.setAvailableBalance(new BigDecimal("5000"));
-
         doNothing().when(pinService).verifyPin("1234");
 
-        try (MockedStatic<SecurityContextHolder> holder = mockStatic(SecurityContextHolder.class)) {
-            Authentication auth = mock(Authentication.class);
-            when(auth.getName()).thenReturn("vendor@example.com");
-            SecurityContext ctx = mock(SecurityContext.class);
-            when(ctx.getAuthentication()).thenReturn(auth);
-            holder.when(SecurityContextHolder::getContext).thenReturn(ctx);
+        when(withdrawalTransactionService.initializeWithdrawal(any(WithdrawalRequest.class)))
+                .thenThrow(new BusinessException("Insufficient available balance"));
 
-            when(userRepository.findByEmail("vendor@example.com"))
-                    .thenReturn(Optional.of(seller));
-            when(businessRepository.findByOwner_Id(1L))
-                    .thenReturn(Optional.of(business));
-            when(walletRepository.findByBusiness_IdForUpdate(1L))
-                    .thenReturn(Optional.of(wallet));
-            when(bankAccountRepository.findById(1L))
-                    .thenReturn(Optional.of(bankAccount));
+        assertThrows(BusinessException.class,
+                () -> withdrawalService.withdraw(request));
 
-            assertThrows(BusinessException.class,
-                    () -> withdrawalService.withdraw(request));
-
-            verify(walletRepository, never()).save(any());
-            verify(withdrawalRepository, never()).save(any());
-        }
+        verify(paystackService, never()).initiateTransfer(any(), any(), any(), any());
     }
 
     @Test
     void withdraw_unauthorizedBankAccount_throws() {
-        Business otherBusiness = Business.builder().id(99L).build();
-        bankAccount.setBusiness(otherBusiness);
-
         doNothing().when(pinService).verifyPin("1234");
 
-        try (MockedStatic<SecurityContextHolder> holder = mockStatic(SecurityContextHolder.class)) {
-            Authentication auth = mock(Authentication.class);
-            when(auth.getName()).thenReturn("vendor@example.com");
-            SecurityContext ctx = mock(SecurityContext.class);
-            when(ctx.getAuthentication()).thenReturn(auth);
-            holder.when(SecurityContextHolder::getContext).thenReturn(ctx);
+        when(withdrawalTransactionService.initializeWithdrawal(any(WithdrawalRequest.class)))
+                .thenThrow(new BusinessException("Unauthorized bank account"));
 
-            when(userRepository.findByEmail("vendor@example.com"))
-                    .thenReturn(Optional.of(seller));
-            when(businessRepository.findByOwner_Id(1L))
-                    .thenReturn(Optional.of(business));
-            when(walletRepository.findByBusiness_IdForUpdate(1L))
-                    .thenReturn(Optional.of(wallet));
-            when(bankAccountRepository.findById(1L))
-                    .thenReturn(Optional.of(bankAccount));
+        assertThrows(BusinessException.class,
+                () -> withdrawalService.withdraw(request));
 
-            assertThrows(BusinessException.class,
-                    () -> withdrawalService.withdraw(request));
-            verify(walletRepository, never()).save(any());
-            verify(withdrawalRepository, never()).save(any());
-        }
+        verify(paystackService, never()).initiateTransfer(any(), any(), any(), any());
     }
 
     @Test
     void withdraw_paystackNetworkFailure_setsFailureReason() {
         doNothing().when(pinService).verifyPin("1234");
 
+        WithdrawalTransactionService.WithdrawalInitData initData =
+                new WithdrawalTransactionService.WithdrawalInitData("WD-REF123", "RCP_test123");
+
+        when(withdrawalTransactionService.initializeWithdrawal(any(WithdrawalRequest.class)))
+                .thenReturn(initData);
+        when(paystackService.initiateTransfer(any(), any(), any(), any()))
+                .thenThrow(new RuntimeException("Network timeout"));
+
         Withdrawal savedWithdrawal = Withdrawal.builder()
-                .id(1L).business(business).amount(new BigDecimal("10000"))
-                .reference("WD-TEST").status(WithdrawalStatus.PENDING)
+                .id(1L).business(business)
+                .amount(new BigDecimal("10000"))
+                .reference("WD-REF123")
+                .status(WithdrawalStatus.PENDING)
+                .failureReason("Initial network timeout: awaiting reconciliation.")
                 .createdAt(LocalDateTime.now()).build();
 
-        try (MockedStatic<SecurityContextHolder> holder = mockStatic(SecurityContextHolder.class)) {
-            Authentication auth = mock(Authentication.class);
-            when(auth.getName()).thenReturn("vendor@example.com");
-            SecurityContext ctx = mock(SecurityContext.class);
-            when(ctx.getAuthentication()).thenReturn(auth);
-            holder.when(SecurityContextHolder::getContext).thenReturn(ctx);
+        when(withdrawalTransactionService.completeWithdrawal(eq("WD-REF123"), isNull()))
+                .thenReturn(savedWithdrawal);
 
-            when(userRepository.findByEmail("vendor@example.com"))
-                    .thenReturn(Optional.of(seller));
-            when(businessRepository.findByOwner_Id(1L))
-                    .thenReturn(Optional.of(business));
-            when(walletRepository.findByBusiness_IdForUpdate(1L))
-                    .thenReturn(Optional.of(wallet));
-            when(bankAccountRepository.findById(1L))
-                    .thenReturn(Optional.of(bankAccount));
-            when(walletRepository.save(any(Wallet.class)))
-                    .thenAnswer(inv -> inv.getArgument(0));
-            when(withdrawalRepository.save(any(Withdrawal.class)))
-                    .thenReturn(savedWithdrawal);
-            when(paystackService.initiateTransfer(any(), any(), any(), any()))
-                    .thenThrow(new RuntimeException("Network timeout"));
-            when(withdrawalRepository.findByReference(anyString()))
-                    .thenReturn(Optional.of(savedWithdrawal));
+        WithdrawalResponse response = withdrawalService.withdraw(request);
 
-            WithdrawalResponse response = withdrawalService.withdraw(request);
-
-            assertNull(response.getTransferCode());
-            verify(withdrawalRepository, times(2)).save(any(Withdrawal.class));
-            assertEquals("Initial network timeout: awaiting reconciliation.",
-                    savedWithdrawal.getFailureReason());
-        }
+        assertNull(response.getTransferCode());
+        assertEquals("Initial network timeout: awaiting reconciliation.",
+                savedWithdrawal.getFailureReason());
+        verify(withdrawalTransactionService).completeWithdrawal(eq("WD-REF123"), isNull());
     }
 
     @Test
     void withdraw_paystackReturnsNoTransferCode_savesNull() {
         doNothing().when(pinService).verifyPin("1234");
 
-        try (MockedStatic<SecurityContextHolder> holder = mockStatic(SecurityContextHolder.class)) {
-            Authentication auth = mock(Authentication.class);
-            when(auth.getName()).thenReturn("vendor@example.com");
-            SecurityContext ctx = mock(SecurityContext.class);
-            when(ctx.getAuthentication()).thenReturn(auth);
-            holder.when(SecurityContextHolder::getContext).thenReturn(ctx);
+        WithdrawalTransactionService.WithdrawalInitData initData =
+                new WithdrawalTransactionService.WithdrawalInitData("WD-REF123", "RCP_test123");
 
-            when(userRepository.findByEmail("vendor@example.com"))
-                    .thenReturn(Optional.of(seller));
-            when(businessRepository.findByOwner_Id(1L))
-                    .thenReturn(Optional.of(business));
-            when(walletRepository.findByBusiness_IdForUpdate(1L))
-                    .thenReturn(Optional.of(wallet));
-            when(bankAccountRepository.findById(1L))
-                    .thenReturn(Optional.of(bankAccount));
-            when(walletRepository.save(any(Wallet.class)))
-                    .thenAnswer(inv -> inv.getArgument(0));
-            when(withdrawalRepository.save(any(Withdrawal.class)))
-                    .thenAnswer(inv -> inv.getArgument(0));
-            when(paystackService.initiateTransfer(any(), any(), any(), any()))
-                    .thenReturn(Map.of()); // no transfer_code in response
-            when(withdrawalRepository.findByReference(anyString()))
-                    .thenAnswer(inv -> {
-                        String ref = inv.getArgument(0);
-                        return Optional.of(Withdrawal.builder()
-                                .id(1L).business(business)
-                                .amount(new BigDecimal("10000"))
-                                .reference(ref)
-                                .status(WithdrawalStatus.PENDING)
-                                .createdAt(LocalDateTime.now()).build());
-                    });
+        when(withdrawalTransactionService.initializeWithdrawal(any(WithdrawalRequest.class)))
+                .thenReturn(initData);
+        when(paystackService.initiateTransfer(any(), any(), any(), any()))
+                .thenReturn(Map.of()); // no transfer_code in response
 
-            WithdrawalResponse response = withdrawalService.withdraw(request);
+        Withdrawal savedWithdrawal = Withdrawal.builder()
+                .id(1L).business(business)
+                .amount(new BigDecimal("10000"))
+                .reference("WD-REF123")
+                .status(WithdrawalStatus.PENDING)
+                .failureReason("Initial network timeout: awaiting reconciliation.")
+                .createdAt(LocalDateTime.now()).build();
 
-            assertNull(response.getTransferCode());
-            verify(withdrawalRepository, times(2)).save(withdrawalCaptor.capture());
-            Withdrawal finalSave = withdrawalCaptor.getAllValues().get(1);
-            assertEquals("Initial network timeout: awaiting reconciliation.",
-                    finalSave.getFailureReason());
-        }
+        when(withdrawalTransactionService.completeWithdrawal(eq("WD-REF123"), isNull()))
+                .thenReturn(savedWithdrawal);
+
+        WithdrawalResponse response = withdrawalService.withdraw(request);
+
+        assertNull(response.getTransferCode());
+        assertEquals("Initial network timeout: awaiting reconciliation.",
+                savedWithdrawal.getFailureReason());
+        verify(withdrawalTransactionService).completeWithdrawal(eq("WD-REF123"), isNull());
     }
 
     // =====================
@@ -334,7 +246,7 @@ class WithdrawalServiceTest {
 
     @Test
     void handleTransferFailed_refundsWallet() {
-        wallet.setAvailableBalance(new BigDecimal("40000")); // after initial deduction
+        wallet.setBalance(new BigDecimal("40000")); // after initial deduction
 
         Withdrawal withdrawal = Withdrawal.builder()
                 .id(1L).business(business).amount(new BigDecimal("10000"))
@@ -356,7 +268,7 @@ class WithdrawalServiceTest {
         assertEquals("Insufficient funds", withdrawal.getFailureReason());
         // restored from 40000 back to 50000
         assertEquals(0, new BigDecimal("50000")
-                .compareTo(wallet.getAvailableBalance()));
+                .compareTo(wallet.getBalance()));
     }
 
     @Test

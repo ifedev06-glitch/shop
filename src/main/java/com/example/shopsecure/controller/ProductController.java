@@ -6,6 +6,7 @@ import com.example.shopsecure.service.ProductService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.domain.Page;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -32,10 +33,29 @@ public class ProductController {
                 .body(productService.createProduct(request, images));
     }
 
+    @PostMapping(consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<ProductResponse> createProductJson(
+            @Valid @RequestBody CreateProductRequest request) {
+
+        log.info("Product creation request (JSON): name={}", request.getName());
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(productService.createProduct(request, null));
+    }
+
     @GetMapping
     public ResponseEntity<List<ProductResponse>> getMyProducts() {
         log.info("Fetching vendor's products");
         return ResponseEntity.ok(productService.getMyProducts());
+    }
+
+    @GetMapping("/search")
+    public ResponseEntity<Page<ProductResponse>> searchProducts(
+            @RequestParam(required = false) String q,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "10") int size) {
+
+        log.info("Product search: q={}, page={}, size={}", q, page, size);
+        return ResponseEntity.ok(productService.searchProducts(q, page, size));
     }
 
     @GetMapping("/{productId}")
@@ -52,6 +72,15 @@ public class ProductController {
 
         log.info("Product update request: productId={}", productId);
         return ResponseEntity.ok(productService.updateProduct(productId, request, images));
+    }
+
+    @PatchMapping("/{productId}")
+    public ResponseEntity<ProductResponse> patchProduct(
+            @PathVariable Long productId,
+            @RequestBody CreateProductRequest request) {
+
+        log.info("Product patch request: productId={}", productId);
+        return ResponseEntity.ok(productService.patchProduct(productId, request));
     }
 
     @DeleteMapping("/{productId}")

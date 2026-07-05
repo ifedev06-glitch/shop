@@ -98,8 +98,7 @@ class WithdrawalFlowIntegrationTest {
 
         wallet = Wallet.builder()
                 .business(business)
-                .availableBalance(new BigDecimal("10000.00"))
-                .processingBalance(BigDecimal.ZERO)
+                .balance(new BigDecimal("10000.00"))
                 .totalWithdrawn(BigDecimal.ZERO)
                 .currency("NGN")
                 .status(WalletStatus.ACTIVE)
@@ -135,7 +134,7 @@ class WithdrawalFlowIntegrationTest {
         assertThat(json).contains("\"status\":\"PENDING\"");
 
         Wallet updated = walletRepository.findByBusiness_Id(business.getId()).orElseThrow();
-        assertThat(updated.getAvailableBalance()).isEqualByComparingTo("9500.00");
+        assertThat(updated.getBalance()).isEqualByComparingTo("9500.00");
     }
 
     @Test
@@ -150,7 +149,7 @@ class WithdrawalFlowIntegrationTest {
                 .andExpect(status().isBadRequest());
 
         Wallet updated = walletRepository.findByBusiness_Id(business.getId()).orElseThrow();
-        assertThat(updated.getAvailableBalance()).isEqualByComparingTo("10000.00");
+        assertThat(updated.getBalance()).isEqualByComparingTo("10000.00");
     }
 
     @Test
@@ -165,7 +164,7 @@ class WithdrawalFlowIntegrationTest {
                 .build();
         withdrawalRepository.save(withdrawal);
 
-        wallet.setAvailableBalance(new BigDecimal("9500.00"));
+        wallet.setBalance(new BigDecimal("9500.00"));
         walletRepository.save(wallet);
 
         String payload = """
@@ -194,7 +193,7 @@ class WithdrawalFlowIntegrationTest {
                 .build();
         withdrawalRepository.save(withdrawal);
 
-        wallet.setAvailableBalance(new BigDecimal("9500.00"));
+        wallet.setBalance(new BigDecimal("9500.00"));
         walletRepository.save(wallet);
 
         String payload = """
@@ -212,7 +211,7 @@ class WithdrawalFlowIntegrationTest {
         assertThat(updated.getFailureReason()).isEqualTo("Insufficient funds");
 
         Wallet w = walletRepository.findByBusiness_Id(business.getId()).orElseThrow();
-        assertThat(w.getAvailableBalance()).isEqualByComparingTo("10000.00");
+        assertThat(w.getBalance()).isEqualByComparingTo("10000.00");
     }
 
     @Test

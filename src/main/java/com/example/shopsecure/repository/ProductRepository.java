@@ -7,12 +7,18 @@ import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import java.util.List;
 import java.util.Optional;
 
 public interface ProductRepository extends JpaRepository<Product, Long> {
 
     List<Product> findByBusiness_Id(Long businessId);
+
+    Page<Product> findByBusiness_Id(Long businessId, Pageable pageable);
+
+    Page<Product> findByBusiness_IdAndNameContainingIgnoreCase(Long businessId, String name, Pageable pageable);
 
     Optional<Product> findByIdAndBusiness_Id(Long id, Long businessId);
 
@@ -37,6 +43,16 @@ public interface ProductRepository extends JpaRepository<Product, Long> {
             "WHERE b.storefrontSlug = :slug AND c.id = :categoryId")
     List<Product> findBySlugAndCategoryWithDetails(@Param("slug") String slug,
                                                    @Param("categoryId") Long categoryId);
+
+    @Query("SELECT p FROM Product p WHERE p.business.id = :businessId " +
+            "AND (LOWER(p.name) LIKE LOWER(CONCAT('%', :query, '%')) " +
+            "OR LOWER(p.description) LIKE LOWER(CONCAT('%', :query, '%')))")
+    List<Product> searchByBusiness(@Param("businessId") Long businessId,
+                                   @Param("query") String query);
+
+    @Query("SELECT p FROM Product p WHERE p.business.id = :businessId " +
+            "AND p.stock <= p.lowStockThreshold")
+    List<Product> findLowStockByBusiness(@Param("businessId") Long businessId);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT p FROM Product p WHERE p.id = :id")

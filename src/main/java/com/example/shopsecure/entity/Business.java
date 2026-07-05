@@ -31,6 +31,8 @@ public class Business {
 
     private String address;
 
+    private String logoUrl;
+
     @OneToOne
     @JoinColumn(name = "owner_id")
     private User owner;

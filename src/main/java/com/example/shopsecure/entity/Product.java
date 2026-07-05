@@ -29,7 +29,12 @@ public class Product {
 
     private BigDecimal price;
 
+    private BigDecimal costPrice;
+
     private Integer stock;
+
+    @Builder.Default
+    private Integer lowStockThreshold = 5;
 
     @ElementCollection
     @CollectionTable(name = "product_images", joinColumns = @JoinColumn(name = "product_id"))

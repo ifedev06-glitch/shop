@@ -9,8 +9,10 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 
@@ -23,13 +25,14 @@ public class BusinessController {
     private final BusinessService businessService;
     private final CartService cartService;
 
-    @PostMapping
+    @PostMapping(consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     public ResponseEntity<BusinessResponse> createBusiness(
-            @Valid @RequestBody CreateBusinessRequest request) {
+            @Valid @ModelAttribute CreateBusinessRequest request,
+            @RequestPart(value = "logo", required = false) MultipartFile logo) {
 
         log.info("Business creation request: businessName={}", request.getBusinessName());
         return ResponseEntity.status(HttpStatus.CREATED)
-                .body(businessService.createBusiness(request));
+                .body(businessService.createBusiness(request, logo));
     }
 
     @GetMapping

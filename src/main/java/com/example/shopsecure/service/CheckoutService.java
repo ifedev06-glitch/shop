@@ -202,23 +202,28 @@ public class CheckoutService {
             return mapToResponse(order);
         }
 
-        // ---------------------------
-        // UPDATE STATUS
-        // ---------------------------
-        public OrderResponse orderReadyForDelivery(
-                Long orderId,
-                UpdateOrderStatusRequest request
-        ) {
+    // ---------------------------
+    // UPDATE STATUS
+    // ---------------------------
+    public OrderResponse orderReadyForDelivery(
+            Long orderId,
+            UpdateOrderStatusRequest request
+    ) {
 
-            Order order = orderRepository
-                    .findById(orderId)
-                    .orElseThrow(() ->
-                            new ResourceNotFoundException("Order not found"));
+        Order order = orderRepository
+                .findById(orderId)
+                .orElseThrow(() ->
+                        new ResourceNotFoundException("Order not found"));
 
-            order.setStatus(request.getStatus());
+        OrderStatus previousStatus = order.getStatus();
+        order.setStatus(request.getStatus());
 
-            return mapToResponse(orderRepository.save(order));
-        }
+        OrderResponse response = mapToResponse(orderRepository.save(order));
+        log.info("Order status changed: orderNumber={}, from={}, to={}",
+                response.getOrderNumber(), previousStatus, request.getStatus());
+
+        return response;
+    }
 
         // ---------------------------
         // MAPPER

@@ -19,12 +19,16 @@ public class CloudinaryService {
     private final Cloudinary cloudinary;
 
     public String upload(MultipartFile file) {
+        return upload(file, "shopsecure/products");
+    }
+
+    public String upload(MultipartFile file, String folder) {
         try {
 
             Map uploadResult = cloudinary.uploader().upload(
                     file.getBytes(),
                     ObjectUtils.asMap(
-                            "folder", "shopsecure/products",
+                            "folder", folder,
                             "fetch_format", "auto",
                             "quality", "auto",
                             "resource_type", "image"

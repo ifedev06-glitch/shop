@@ -60,6 +60,12 @@ public class CheckoutLinkService {
                 );
             }
 
+            BigDecimal discount = request.getDiscount() != null ? request.getDiscount() : BigDecimal.ZERO;
+            BigDecimal totalAmount = request.getAmount().subtract(discount);
+            if (totalAmount.compareTo(BigDecimal.ZERO) < 0) {
+                totalAmount = BigDecimal.ZERO;
+            }
+
             CheckoutLink checkoutLink = CheckoutLink.builder()
                     .slug(slug)
                     .business(business)
@@ -67,6 +73,8 @@ public class CheckoutLinkService {
                     .description(request.getDescription())
                     .customLink(true)
                     .subtotalAmount(request.getAmount())
+                    .totalAmount(totalAmount)
+                    .discount(discount)
                     .active(true)
                     .createdAt(LocalDateTime.now())
                     .build();
@@ -78,6 +86,8 @@ public class CheckoutLinkService {
                     .slug(slug)
                     .checkoutUrl(baseUrl + "/checkout/" + slug)
                     .subtotalAmount(request.getAmount())
+                    .totalAmount(totalAmount)
+                    .discount(discount)
                     .build();
         }
 
@@ -124,7 +134,15 @@ public class CheckoutLinkService {
             checkoutLinkItemRepository.save(linkItem);
         }
 
+        BigDecimal discount = request.getDiscount() != null ? request.getDiscount() : BigDecimal.ZERO;
+        BigDecimal totalAmount = subtotal.subtract(discount);
+        if (totalAmount.compareTo(BigDecimal.ZERO) < 0) {
+            totalAmount = BigDecimal.ZERO;
+        }
+
         savedLink.setSubtotalAmount(subtotal);
+        savedLink.setTotalAmount(totalAmount);
+        savedLink.setDiscount(discount);
         checkoutLinkRepository.save(savedLink);
         log.info("Checkout link created: slug={}", slug);
 
@@ -132,6 +150,8 @@ public class CheckoutLinkService {
                 .slug(slug)
                 .checkoutUrl(baseUrl + "/checkout/" + slug)
                 .subtotalAmount(subtotal)
+                .totalAmount(totalAmount)
+                .discount(discount)
                 .build();
     }
 
@@ -147,6 +167,11 @@ public class CheckoutLinkService {
 
         if (Boolean.TRUE.equals(checkoutLink.getCustomLink())) {
 
+            BigDecimal discount = checkoutLink.getDiscount() != null ? checkoutLink.getDiscount() : BigDecimal.ZERO;
+            BigDecimal totalAmount = checkoutLink.getTotalAmount() != null
+                    ? checkoutLink.getTotalAmount()
+                    : checkoutLink.getSubtotalAmount();
+
             return CheckoutLinkDetailsResponse.builder()
                     .businessName(checkoutLink.getBusiness().getBusinessName())
                     .slug(checkoutLink.getSlug())
@@ -154,6 +179,8 @@ public class CheckoutLinkService {
                     .description(checkoutLink.getDescription())
                     .customLink(true)
                     .subtotalAmount(checkoutLink.getSubtotalAmount())
+                    .totalAmount(totalAmount)
+                    .discount(discount)
                     .items(List.of())
                     .build();
         }
@@ -174,11 +201,18 @@ public class CheckoutLinkService {
                         )
                         .toList();
 
+        BigDecimal discount = checkoutLink.getDiscount() != null ? checkoutLink.getDiscount() : BigDecimal.ZERO;
+        BigDecimal totalAmount = checkoutLink.getTotalAmount() != null
+                ? checkoutLink.getTotalAmount()
+                : checkoutLink.getSubtotalAmount();
+
         return CheckoutLinkDetailsResponse.builder()
                 .businessName(checkoutLink.getBusiness().getBusinessName())
                 .slug(checkoutLink.getSlug())
                 .customLink(false)
                 .subtotalAmount(checkoutLink.getSubtotalAmount())
+                .totalAmount(totalAmount)
+                .discount(discount)
                 .items(items)
                 .build();
     }
@@ -186,6 +220,8 @@ public class CheckoutLinkService {
     // ---------------------------
     // PAY FOR CHECKOUT LINK
     // ---------------------------
+
+    @Transactional
     public CheckoutPaymentResponse payForCheckoutLink(
             String slug,
             CheckoutCustomerRequest request
@@ -224,9 +260,9 @@ public class CheckoutLinkService {
             throw new RuntimeException("Checkout link is inactive");
         }
 
-        ShippingRate rate = shippingService.getShippingRate(request.getShippingArea());
-        BigDecimal shippingFee = rate.getFee();
-        BigDecimal totalAmount = checkoutLink.getSubtotalAmount().add(shippingFee);
+        BigDecimal totalAmount = checkoutLink.getTotalAmount() != null
+                ? checkoutLink.getTotalAmount()
+                : checkoutLink.getSubtotalAmount();
 
         // validate stock for product-based checkout links
         if (!Boolean.TRUE.equals(checkoutLink.getCustomLink())) {
@@ -270,12 +306,13 @@ public class CheckoutLinkService {
                 .phoneNumber(request.getPhoneNumber())
                 .deliveryAddress(request.getDeliveryAddress())
                 .shippingArea(request.getShippingArea())
-                .shippingFee(shippingFee)
+                .shippingFee(BigDecimal.ZERO)
                 .totalAmount(totalAmount)
                 .title(checkoutLink.getTitle())
                 .description(checkoutLink.getDescription())
                 .status(OrderStatus.PENDING)
                 .paymentStatus("PENDING")
+                .stockDeducted(false)
                 .createdAt(LocalDateTime.now())
                 .build();
 

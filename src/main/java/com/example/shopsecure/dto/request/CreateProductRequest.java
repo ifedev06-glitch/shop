@@ -22,9 +22,15 @@ public class CreateProductRequest {
     @DecimalMin(value = "1.00", message = "Price must be at least ₦1")
     private BigDecimal price;
 
+    @NotNull(message = "Cost price is required")
+    @DecimalMin(value = "0.00", message = "Cost price cannot be negative")
+    private BigDecimal costPrice;
+
     @NotNull(message = "Stock is required")
     @Min(value = 0, message = "Stock cannot be negative")
     private Integer stock;
+
+    private Integer lowStockThreshold;
 
     @NotNull(message = "Category is required")
     private Long categoryId;

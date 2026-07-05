@@ -27,5 +27,7 @@ public class CheckoutLinkDetailsResponse {
     private BigDecimal deliveryFee;
     private BigDecimal subtotalAmount;
 
+    private BigDecimal discount;
+
     private List<CheckoutLinkItemResponse> items;
 }

@@ -15,7 +15,5 @@ public class WalletResponse {
 
     private String businessName;
 
-    private BigDecimal availableBalance;
-
-    private BigDecimal processingBalance;
+    private BigDecimal balance;
 }

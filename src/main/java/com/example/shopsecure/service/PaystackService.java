@@ -154,6 +154,8 @@ public class PaystackService {
                         Map.class
                 );
 
+        log.info("FULL PAYSTACK RESPONSE = {}", response.getBody());
+
         return (Map<String, Object>) response.getBody().get("data");
     }
 

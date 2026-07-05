@@ -138,8 +138,7 @@ class PaymentWebhookIntegrationTest {
 
         Wallet wallet = Wallet.builder()
                 .business(business)
-                .availableBalance(BigDecimal.ZERO)
-                .processingBalance(BigDecimal.ZERO)
+                .balance(BigDecimal.ZERO)
                 .totalWithdrawn(BigDecimal.ZERO)
                 .currency("NGN")
                 .status(WalletStatus.ACTIVE)
@@ -190,7 +189,7 @@ class PaymentWebhookIntegrationTest {
         assertThat(updatedOrder.getPaymentStatus()).isEqualTo("PAID");
 
         Wallet wallet = walletRepository.findByBusiness_Id(order.getBusiness().getId()).orElseThrow();
-        assertThat(wallet.getProcessingBalance()).isEqualByComparingTo("700.00");
+        assertThat(wallet.getBalance()).isEqualByComparingTo("700.00");
 
         Product updatedProduct = productRepository.findById(product.getId()).orElseThrow();
         assertThat(updatedProduct.getStock()).isEqualTo(8);
@@ -215,6 +214,6 @@ class PaymentWebhookIntegrationTest {
                 .andExpect(status().isOk());
 
         Wallet wallet = walletRepository.findByBusiness_Id(order.getBusiness().getId()).orElseThrow();
-        assertThat(wallet.getProcessingBalance()).isEqualByComparingTo("700.00");
+        assertThat(wallet.getBalance()).isEqualByComparingTo("700.00");
     }
 }

@@ -44,4 +44,6 @@ public class CheckoutLink {
 
     private BigDecimal subtotalAmount;
 
+    private BigDecimal discount;
+
 }

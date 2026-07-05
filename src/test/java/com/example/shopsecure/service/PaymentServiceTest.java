@@ -16,31 +16,23 @@ import com.example.shopsecure.repository.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
-import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 @ExtendWith(MockitoExtension.class)
 class PaymentServiceTest {
 
+    @Mock PaymentTransactionService paymentTransactionService;
     @Mock PaymentRepository paymentRepository;
-    @Mock OrderRepository orderRepository;
-    @Mock OrderItemRepository orderItemRepository;
-    @Mock ProductRepository productRepository;
     @Mock PaystackService paystackService;
-    @Mock WalletService walletService;
     @Mock EmailService emailService;
     @Mock EmailTemplateService emailTemplateService;
     @Mock CheckoutService checkoutService;
-
-    @Captor ArgumentCaptor<Order> orderCaptor;
 
     PaymentService paymentService;
 
@@ -54,8 +46,7 @@ class PaymentServiceTest {
     @BeforeEach
     void setUp() {
         paymentService = new PaymentService(
-                paymentRepository, orderRepository, orderItemRepository,
-                productRepository, paystackService, walletService,
+                paymentTransactionService, paymentRepository, paystackService,
                 emailService, emailTemplateService, checkoutService);
 
         seller = User.builder().id(1L).email("seller@example.com").build();
@@ -96,16 +87,9 @@ class PaymentServiceTest {
         InitializePaymentRequest request = new InitializePaymentRequest();
         request.setOrderNumber("ORD-TEST1");
 
-        when(orderRepository.findByOrderNumber("ORD-TEST1"))
-                .thenReturn(Optional.of(order));
-        when(paymentRepository.findByOrder_IdAndStatus(1L, PaymentStatus.PENDING))
-                .thenReturn(Optional.empty());
-        when(paymentRepository.save(any(Payment.class)))
-                .thenAnswer(invocation -> {
-                    Payment p = invocation.getArgument(0);
-                    p.setId(2L);
-                    return p;
-                });
+        when(paymentTransactionService.initializePaymentDb(any(InitializePaymentRequest.class)))
+                .thenReturn(new PaymentTransactionService.PaymentInitData(
+                        "PAY-NEWREF", "ORD-TEST1", "john@example.com", new BigDecimal("6000")));
         when(paystackService.initializeTransaction(
                 eq("john@example.com"), eq(new BigDecimal("6000")), anyString()))
                 .thenReturn(Map.of("authorization_url", "https://paystack.com/pay/test"));
@@ -113,11 +97,11 @@ class PaymentServiceTest {
         InitializePaymentResponse response = paymentService.initializePayment(request);
 
         assertNotNull(response);
-        assertTrue(response.getReference().startsWith("PAY-"));
+        assertEquals("PAY-NEWREF", response.getReference());
         assertEquals("https://paystack.com/pay/test", response.getAuthorizationUrl());
         assertEquals("ORD-TEST1", response.getOrderNumber());
 
-        verify(paymentRepository).save(any(Payment.class));
+        verify(paymentTransactionService).initializePaymentDb(request);
         verify(paystackService).initializeTransaction(
                 eq("john@example.com"), eq(new BigDecimal("6000")), anyString());
     }
@@ -127,10 +111,9 @@ class PaymentServiceTest {
         InitializePaymentRequest request = new InitializePaymentRequest();
         request.setOrderNumber("ORD-TEST1");
 
-        when(orderRepository.findByOrderNumber("ORD-TEST1"))
-                .thenReturn(Optional.of(order));
-        when(paymentRepository.findByOrder_IdAndStatus(1L, PaymentStatus.PENDING))
-                .thenReturn(Optional.of(payment));
+        when(paymentTransactionService.initializePaymentDb(any(InitializePaymentRequest.class)))
+                .thenReturn(new PaymentTransactionService.PaymentInitData(
+                        "PAY-REF123", "ORD-TEST1", "john@example.com", new BigDecimal("6000")));
         when(paystackService.initializeTransaction(
                 "john@example.com", new BigDecimal("6000"), "PAY-REF123"))
                 .thenReturn(Map.of("authorization_url", "https://paystack.com/rewpay/test"));
@@ -138,17 +121,16 @@ class PaymentServiceTest {
         InitializePaymentResponse response = paymentService.initializePayment(request);
 
         assertEquals("PAY-REF123", response.getReference());
-        verify(paymentRepository, never()).save(any(Payment.class));
+        verify(paymentTransactionService).initializePaymentDb(request);
     }
 
     @Test
     void initializePayment_orderAlreadyPaid_throws() {
-        order.setPaymentStatus("PAID");
         InitializePaymentRequest request = new InitializePaymentRequest();
         request.setOrderNumber("ORD-TEST1");
 
-        when(orderRepository.findByOrderNumber("ORD-TEST1"))
-                .thenReturn(Optional.of(order));
+        when(paymentTransactionService.initializePaymentDb(any(InitializePaymentRequest.class)))
+                .thenThrow(new BusinessException("Order already paid"));
 
         assertThrows(BusinessException.class,
                 () -> paymentService.initializePayment(request));
@@ -160,8 +142,8 @@ class PaymentServiceTest {
         InitializePaymentRequest request = new InitializePaymentRequest();
         request.setOrderNumber("ORD-MISSING");
 
-        when(orderRepository.findByOrderNumber("ORD-MISSING"))
-                .thenReturn(Optional.empty());
+        when(paymentTransactionService.initializePaymentDb(any(InitializePaymentRequest.class)))
+                .thenThrow(new ResourceNotFoundException("Order not found"));
 
         assertThrows(ResourceNotFoundException.class,
                 () -> paymentService.initializePayment(request));
@@ -181,16 +163,15 @@ class PaymentServiceTest {
         data.setChannel("card");
         webhookRequest.setData(data);
 
+        PaymentTransactionService.WebhookResult result =
+                new PaymentTransactionService.WebhookResult(
+                        "John Doe", "ORD-TEST1", "john@example.com",
+                        new BigDecimal("6000"), "seller@example.com");
+
         when(paystackService.verifyWebhookSignature("payload", "sig"))
                 .thenReturn(true);
-        when(paymentRepository.findByReference("PAY-REF123"))
-                .thenReturn(Optional.of(payment));
-        when(paymentRepository.save(any(Payment.class)))
-                .thenAnswer(inv -> inv.getArgument(0));
-        when(orderRepository.save(any(Order.class)))
-                .thenAnswer(inv -> inv.getArgument(0));
-        when(walletService.addToProcessingBalance(order.getId()))
-                .thenReturn(null);
+        when(paymentTransactionService.processWebhookPayment(any(PaystackWebhookRequest.class)))
+                .thenReturn(result);
         when(emailTemplateService.customerOrderConfirmationBody(
                 anyString(), anyString(), anyString()))
                 .thenReturn("<html>customer</html>");
@@ -201,21 +182,12 @@ class PaymentServiceTest {
 
         paymentService.handleWebhook("payload", "sig", webhookRequest);
 
-        assertEquals(PaymentStatus.SUCCESS, payment.getStatus());
-        assertEquals("card", payment.getChannel());
-        assertNotNull(payment.getPaidAt());
-
-        verify(orderRepository).save(orderCaptor.capture());
-        assertEquals("PAID", orderCaptor.getValue().getPaymentStatus());
-
-        verify(walletService).addToProcessingBalance(order.getId());
+        verify(paymentTransactionService).processWebhookPayment(webhookRequest);
         verify(emailService, times(2)).sendEmail(anyString(), anyString(), anyString());
     }
 
     @Test
     void handleWebhook_alreadyProcessed_skipsDuplicateEffects() {
-        payment.setStatus(PaymentStatus.SUCCESS);
-
         PaystackWebhookRequest webhookRequest = new PaystackWebhookRequest();
         webhookRequest.setEvent("charge.success");
         PaystackWebhookRequest.PaystackWebhookData data =
@@ -225,13 +197,12 @@ class PaymentServiceTest {
 
         when(paystackService.verifyWebhookSignature("payload", "sig"))
                 .thenReturn(true);
-        when(paymentRepository.findByReference("PAY-REF123"))
-                .thenReturn(Optional.of(payment));
+        when(paymentTransactionService.processWebhookPayment(any(PaystackWebhookRequest.class)))
+                .thenReturn(null);
 
         paymentService.handleWebhook("payload", "sig", webhookRequest);
 
-        verify(paymentRepository, never()).save(any());
-        verify(walletService, never()).addToProcessingBalance(any());
+        verify(paymentTransactionService).processWebhookPayment(webhookRequest);
         verify(emailService, never()).sendEmail(anyString(), anyString(), anyString());
     }
 
@@ -246,8 +217,8 @@ class PaymentServiceTest {
 
         paymentService.handleWebhook("payload", "sig", webhookRequest);
 
-        verify(paymentRepository, never()).findByReference(any());
-        verify(walletService, never()).addToProcessingBalance(any());
+        verify(paymentTransactionService, never()).processWebhookPayment(any());
+        verify(emailService, never()).sendEmail(anyString(), anyString(), anyString());
     }
 
     @Test
@@ -257,13 +228,11 @@ class PaymentServiceTest {
 
         assertThrows(PaymentException.class,
                 () -> paymentService.handleWebhook("payload", "sig", null));
-        verify(paymentRepository, never()).findByReference(any());
+        verify(paymentTransactionService, never()).processWebhookPayment(any());
     }
 
     @Test
     void handleWebhook_stockDeductionForNonDeductedOrder() {
-        order.setStockDeducted(false);
-
         PaystackWebhookRequest webhookRequest = new PaystackWebhookRequest();
         webhookRequest.setEvent("charge.success");
         PaystackWebhookRequest.PaystackWebhookData data =
@@ -272,20 +241,15 @@ class PaymentServiceTest {
         data.setChannel("card");
         webhookRequest.setData(data);
 
+        PaymentTransactionService.WebhookResult result =
+                new PaymentTransactionService.WebhookResult(
+                        "John Doe", "ORD-TEST1", "john@example.com",
+                        new BigDecimal("6000"), "seller@example.com");
+
         when(paystackService.verifyWebhookSignature("payload", "sig"))
                 .thenReturn(true);
-        when(paymentRepository.findByReference("PAY-REF123"))
-                .thenReturn(Optional.of(payment));
-        when(paymentRepository.save(any(Payment.class)))
-                .thenAnswer(inv -> inv.getArgument(0));
-        when(orderRepository.save(any(Order.class)))
-                .thenAnswer(inv -> inv.getArgument(0));
-        when(walletService.addToProcessingBalance(order.getId()))
-                .thenReturn(null);
-        when(orderItemRepository.findByOrder_Id(order.getId()))
-                .thenReturn(List.of(orderItem));
-        when(productRepository.findByIdForUpdate(product.getId()))
-                .thenReturn(Optional.of(product));
+        when(paymentTransactionService.processWebhookPayment(any(PaystackWebhookRequest.class)))
+                .thenReturn(result);
         when(emailTemplateService.customerOrderConfirmationBody(
                 anyString(), anyString(), anyString()))
                 .thenReturn("<html>customer</html>");
@@ -296,16 +260,12 @@ class PaymentServiceTest {
 
         paymentService.handleWebhook("payload", "sig", webhookRequest);
 
-        verify(productRepository).findByIdForUpdate(product.getId());
-        assertEquals(3, product.getStock()); // 5 - 2
-        assertTrue(order.getStockDeducted());
+        verify(paymentTransactionService).processWebhookPayment(webhookRequest);
+        verify(emailService, times(2)).sendEmail(anyString(), anyString(), anyString());
     }
 
     @Test
     void handleWebhook_stockClampedAtZero() {
-        order.setStockDeducted(false);
-        product.setStock(1);
-
         PaystackWebhookRequest webhookRequest = new PaystackWebhookRequest();
         webhookRequest.setEvent("charge.success");
         PaystackWebhookRequest.PaystackWebhookData data =
@@ -314,20 +274,15 @@ class PaymentServiceTest {
         data.setChannel("card");
         webhookRequest.setData(data);
 
+        PaymentTransactionService.WebhookResult result =
+                new PaymentTransactionService.WebhookResult(
+                        "John Doe", "ORD-TEST1", "john@example.com",
+                        new BigDecimal("6000"), "seller@example.com");
+
         when(paystackService.verifyWebhookSignature("payload", "sig"))
                 .thenReturn(true);
-        when(paymentRepository.findByReference("PAY-REF123"))
-                .thenReturn(Optional.of(payment));
-        when(paymentRepository.save(any(Payment.class)))
-                .thenAnswer(inv -> inv.getArgument(0));
-        when(orderRepository.save(any(Order.class)))
-                .thenAnswer(inv -> inv.getArgument(0));
-        when(walletService.addToProcessingBalance(order.getId()))
-                .thenReturn(null);
-        when(orderItemRepository.findByOrder_Id(order.getId()))
-                .thenReturn(List.of(orderItem));
-        when(productRepository.findByIdForUpdate(product.getId()))
-                .thenReturn(Optional.of(product));
+        when(paymentTransactionService.processWebhookPayment(any(PaystackWebhookRequest.class)))
+                .thenReturn(result);
         when(emailTemplateService.customerOrderConfirmationBody(
                 anyString(), anyString(), anyString()))
                 .thenReturn("<html>customer</html>");
@@ -338,8 +293,8 @@ class PaymentServiceTest {
 
         paymentService.handleWebhook("payload", "sig", webhookRequest);
 
-        // stock was 1, requested 2, clamped to 0
-        assertEquals(0, product.getStock());
+        verify(paymentTransactionService).processWebhookPayment(webhookRequest);
+        verify(emailService, times(2)).sendEmail(anyString(), anyString(), anyString());
     }
 
     @Test

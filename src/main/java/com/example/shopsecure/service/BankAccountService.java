@@ -80,7 +80,8 @@ public class BankAccountService {
 
         BankAccount saved =
                 bankAccountRepository.save(bankAccount);
-        log.info("Bank account saved/updated for business: businessId={}, accountNumber={}", business.getId(), saved.getAccountNumber());
+        String maskedAccount = "****" + saved.getAccountNumber().substring(Math.max(0, saved.getAccountNumber().length() - 4));
+        log.info("Bank account saved/updated for business: businessId={}, account={}", business.getId(), maskedAccount);
 
         return mapToResponse(saved);
     }

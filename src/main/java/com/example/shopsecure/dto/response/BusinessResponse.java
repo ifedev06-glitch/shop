@@ -18,5 +18,6 @@ public class BusinessResponse {
     private String phoneNumber;
     private String address;
     private LocalDateTime createdAt;
-    private  String storefrontUrl;
+    private String storefrontUrl;
+    private String logoUrl;
 }

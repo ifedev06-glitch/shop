@@ -28,10 +28,7 @@ public class Wallet {
     private Business business;
 
     @Column(nullable = false)
-    private BigDecimal availableBalance = BigDecimal.ZERO;
-
-    @Column(nullable = false)
-    private BigDecimal processingBalance = BigDecimal.ZERO;
+    private BigDecimal balance = BigDecimal.ZERO;
 
     @Column(nullable = false)
     private BigDecimal totalWithdrawn = BigDecimal.ZERO;

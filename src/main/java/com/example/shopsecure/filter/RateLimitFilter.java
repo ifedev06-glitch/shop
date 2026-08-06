@@ -22,6 +22,16 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class RateLimitFilter extends OncePerRequestFilter {
 
+    private final boolean enabled;
+
+    public RateLimitFilter() {
+        this(true);
+    }
+
+    public RateLimitFilter(boolean enabled) {
+        this.enabled = enabled;
+    }
+
     // Caffeine cache — auto-evicts idle IPs after 1 hour, caps at 10k entries
     private final Cache<String, Bucket> buckets = Caffeine.newBuilder()
             .expireAfterAccess(1, TimeUnit.HOURS)
@@ -48,7 +58,8 @@ public class RateLimitFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getRequestURI();
-        return path.startsWith("/actuator")
+        return !enabled
+                || path.startsWith("/actuator")
                 || path.startsWith("/public")
                 || path.equals("/health");
     }

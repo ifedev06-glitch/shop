@@ -24,14 +24,14 @@ public class AuthController {
     @PostMapping("/register")
     public ResponseEntity<AuthResponse> register(
             @Valid @RequestBody RegisterRequest request) {
-        log.info("Merchant registration attempt: email={}", request.getEmail());
+        log.info("Account registration attempt: email={}", request.getEmail());
         return ResponseEntity.ok(authService.register(request));
     }
 
     @PostMapping("/login")
     public ResponseEntity<AuthResponse> login(
             @Valid @RequestBody LoginRequest request){
-        log.info("Merchant login attempt: email={}", request.getEmail());
+        log.info("Account login attempt: email={}", request.getEmail());
         return ResponseEntity.ok(authService.login(request));
     }
 }

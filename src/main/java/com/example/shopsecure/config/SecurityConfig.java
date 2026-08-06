@@ -5,6 +5,7 @@ import lombok.RequiredArgsConstructor;
 import com.example.shopsecure.config.RateLimitFilter;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
@@ -47,21 +48,17 @@ public class SecurityConfig {
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers("/api/auth/**").permitAll()
-                        .requestMatchers("/api/payments/webhook").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/orders/token/*").permitAll()
+                        .requestMatchers(HttpMethod.POST,
+                                "/orders/token/*/vendor-info",
+                                "/orders/token/*/verify-otp").permitAll()
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")
-                        .requestMatchers("/api/vendor/**").hasRole("BUSINESS")
-                        .requestMatchers("/api/storefront/**", "/api/cart/**", "/api/checkout/**").permitAll()
-                        .requestMatchers("/api/test/email").permitAll()
-                        .requestMatchers("/orders/payment/verify/**").permitAll()
-                        .requestMatchers("/api/payments/initialize/**").permitAll()
-                        .requestMatchers("/api/checkout-links/**").permitAll()
-                        .requestMatchers("/api/public/**").permitAll()
                         .anyRequest().authenticated()
                 )
                 .authenticationProvider(authenticationProvider())
                 .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
-                .addFilterBefore(rateLimitFilter, JwtAuthFilter.class)
-                .addFilterBefore(requestLoggingFilter, RateLimitFilter.class);
+                .addFilterAfter(rateLimitFilter, JwtAuthFilter.class)
+                .addFilterBefore(requestLoggingFilter, JwtAuthFilter.class);
 
         return http.build();
     }
@@ -96,7 +93,7 @@ public class SecurityConfig {
                 "http://localhost:3000",
                 "https://www.shopsecure.app"
         ));
-        configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+        configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("*"));
         configuration.setAllowCredentials(true);
 

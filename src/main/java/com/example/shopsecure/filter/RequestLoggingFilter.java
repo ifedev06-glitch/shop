@@ -27,7 +27,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
         } finally {
             long duration = System.currentTimeMillis() - start;
             String method = request.getMethod();
-            String path = request.getRequestURI();
+            String path = sanitizePath(request.getRequestURI());
             int status = response.getStatus();
             String userId = (String) request.getAttribute("authenticatedUserId");
 
@@ -57,5 +57,9 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
                 }
             }
         }
+    }
+
+    private String sanitizePath(String path) {
+        return path.replaceAll("(/orders/token/)[^/]+", "$1[redacted]");
     }
 }

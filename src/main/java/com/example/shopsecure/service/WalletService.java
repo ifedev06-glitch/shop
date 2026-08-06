@@ -1,108 +1,104 @@
 package com.example.shopsecure.service;
 
-import com.example.shopsecure.dto.response.WalletResponse;
-import com.example.shopsecure.entity.*;
-import com.example.shopsecure.exception.ResourceNotFoundException;
-import com.example.shopsecure.repository.BusinessRepository;
-import com.example.shopsecure.repository.UserRepository;
+import com.example.shopsecure.entity.Order;
+import com.example.shopsecure.entity.Wallet;
+import com.example.shopsecure.entity.WalletTransaction;
+import com.example.shopsecure.exception.BusinessException;
 import com.example.shopsecure.repository.WalletRepository;
+import com.example.shopsecure.repository.WalletTransactionRepository;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.time.LocalDateTime;
+import java.math.RoundingMode;
+import java.time.Instant;
 
-@Slf4j
 @Service
 @RequiredArgsConstructor
-@Transactional
 public class WalletService {
 
     private final WalletRepository walletRepository;
-    private final BusinessRepository businessRepository;
-    private final UserRepository userRepository;
+    private final WalletTransactionRepository transactionRepository;
 
-    public WalletResponse getWallet() {
-        User currentUser = getCurrentUser();
-        Business business = businessRepository
-                .findByOwner_Id(currentUser.getId())
-                .orElseThrow(() ->
-                        new ResourceNotFoundException("Business not found"));
-        Wallet wallet = walletRepository
-                .findByBusiness_Id(business.getId())
-                .orElseGet(() -> createWallet(business));
-        return mapToResponse(wallet);
-    }
-
-    public WalletResponse credit(Long businessId, BigDecimal amount) {
-        Wallet wallet = walletRepository
-                .findByBusiness_IdForUpdate(businessId)
-                .orElseGet(() -> {
-                    Business business = businessRepository
-                            .findById(businessId)
-                            .orElseThrow(() ->
-                                    new ResourceNotFoundException("Business not found"));
-                    return createWallet(business);
-                });
-
-        wallet.setBalance(wallet.getBalance().add(amount));
-        wallet.setUpdatedAt(LocalDateTime.now());
-
-        Wallet saved = walletRepository.save(wallet);
-        log.info("Wallet credited: businessId={}, amount={}, newBalance={}",
-                businessId, amount, saved.getBalance());
-        return mapToResponse(saved);
-    }
-
-    public WalletResponse debit(Long businessId, BigDecimal amount) {
-        Wallet wallet = walletRepository
-                .findByBusiness_IdForUpdate(businessId)
-                .orElseThrow(() ->
-                        new ResourceNotFoundException("Wallet not found"));
-
-        if (wallet.getBalance().compareTo(amount) < 0) {
-            throw new RuntimeException("Insufficient balance");
+    @Transactional
+    public WalletMovement moveToProcessing(
+            Long userId,
+            Order order,
+            BigDecimal requestedAmount,
+            String idempotencyKey
+    ) {
+        WalletTransaction existing = transactionRepository.findByOrder_Id(order.getId()).orElse(null);
+        if (existing != null) {
+            return movement(existing);
         }
 
-        wallet.setBalance(wallet.getBalance().subtract(amount));
-        wallet.setUpdatedAt(LocalDateTime.now());
+        BigDecimal amount = money(requestedAmount);
+        Wallet wallet = walletRepository.findByUserIdForUpdate(userId)
+                .orElseThrow(this::insufficientBalance);
+        if (!wallet.getCurrency().equals(order.getCurrency())) {
+            throw new BusinessException("Wallet currency does not match the order currency");
+        }
+        if (wallet.getAvailableBalance().compareTo(amount) < 0) {
+            throw insufficientBalance();
+        }
 
-        Wallet saved = walletRepository.save(wallet);
-        log.info("Wallet debited: businessId={}, amount={}, newBalance={}",
-                businessId, amount, saved.getBalance());
-        return mapToResponse(saved);
+        BigDecimal availableBefore = money(wallet.getAvailableBalance());
+        BigDecimal processingBefore = money(wallet.getProcessingBalance());
+        BigDecimal availableAfter = money(availableBefore.subtract(amount));
+        BigDecimal processingAfter = money(processingBefore.add(amount));
+
+        wallet.setAvailableBalance(availableAfter);
+        wallet.setProcessingBalance(processingAfter);
+        wallet.setUpdatedAt(Instant.now());
+        walletRepository.save(wallet);
+
+        WalletTransaction transaction = transactionRepository.save(WalletTransaction.builder()
+                .wallet(wallet)
+                .order(order)
+                .reference("escrow-order-" + order.getId())
+                .idempotencyKey(idempotencyKey)
+                .amount(amount)
+                .availableBalanceBefore(availableBefore)
+                .availableBalanceAfter(availableAfter)
+                .processingBalanceBefore(processingBefore)
+                .processingBalanceAfter(processingAfter)
+                .createdAt(Instant.now())
+                .build());
+        return movement(transaction);
     }
 
-    private Wallet createWallet(Business business) {
-        Wallet wallet = Wallet.builder()
-                .business(business)
-                .balance(BigDecimal.ZERO)
-                .totalWithdrawn(BigDecimal.ZERO)
-                .status(WalletStatus.ACTIVE)
-                .currency("NGN")
-                .createdAt(LocalDateTime.now())
-                .build();
-        return walletRepository.save(wallet);
+    @Transactional(readOnly = true)
+    public WalletMovement getOrderMovement(Long orderId) {
+        return transactionRepository.findByOrder_Id(orderId)
+                .map(this::movement)
+                .orElseThrow(() -> new BusinessException("Wallet payment record was not found"));
     }
 
-    private User getCurrentUser() {
-        String email = SecurityContextHolder
-                .getContext()
-                .getAuthentication()
-                .getName();
-        return userRepository.findByEmail(email)
-                .orElseThrow(() ->
-                        new ResourceNotFoundException("User not found"));
+    private WalletMovement movement(WalletTransaction transaction) {
+        return new WalletMovement(
+                transaction.getAmount(),
+                transaction.getAvailableBalanceAfter(),
+                transaction.getProcessingBalanceAfter(),
+                transaction.getWallet().getCurrency()
+        );
     }
 
-    private WalletResponse mapToResponse(Wallet wallet) {
-        return WalletResponse.builder()
-                .walletId(wallet.getId())
-                .businessName(wallet.getBusiness().getBusinessName())
-                .balance(wallet.getBalance())
-                .build();
+    private BusinessException insufficientBalance() {
+        return new BusinessException(
+                "Insufficient wallet balance. Top up your wallet before paying for this order."
+        );
+    }
+
+    private BigDecimal money(BigDecimal amount) {
+        return amount.setScale(2, RoundingMode.HALF_UP);
+    }
+
+    public record WalletMovement(
+            BigDecimal amount,
+            BigDecimal availableBalance,
+            BigDecimal processingBalance,
+            String currency
+    ) {
     }
 }

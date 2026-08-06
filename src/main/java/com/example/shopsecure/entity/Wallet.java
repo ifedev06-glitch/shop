@@ -1,19 +1,17 @@
 package com.example.shopsecure.entity;
 
 import jakarta.persistence.*;
-import lombok.AllArgsConstructor;
-import lombok.Builder;
-import lombok.Data;
-import lombok.NoArgsConstructor;
+import lombok.*;
 
 import java.math.BigDecimal;
-import java.time.LocalDateTime;
+import java.time.Instant;
 
 @Entity
 @Table(name = "wallets", indexes = {
-        @Index(name = "idx_wallets_business_id", columnList = "business_id", unique = true)
+        @Index(name = "idx_wallets_user_id", columnList = "user_id", unique = true)
 })
-@Data
+@Getter
+@Setter
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
@@ -23,23 +21,28 @@ public class Wallet {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @OneToOne
-    @JoinColumn(name = "business_id")
-    private Business business;
+    @OneToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "user_id", nullable = false, unique = true)
+    private User user;
+
+    @Builder.Default
+    @Column(nullable = false)
+    private BigDecimal availableBalance = BigDecimal.ZERO;
+
+    @Builder.Default
+    @Column(nullable = false)
+    private BigDecimal processingBalance = BigDecimal.ZERO;
+
+    @Builder.Default
+    @Column(nullable = false, length = 3)
+    private String currency = "NGN";
 
     @Column(nullable = false)
-    private BigDecimal balance = BigDecimal.ZERO;
+    private Instant createdAt;
 
     @Column(nullable = false)
-    private BigDecimal totalWithdrawn = BigDecimal.ZERO;
+    private Instant updatedAt;
 
-    @Column(nullable = false)
-    private String currency;
-
-    @Enumerated(EnumType.STRING)
-    private WalletStatus status = WalletStatus.ACTIVE;
-
-    private LocalDateTime createdAt;
-
-    private LocalDateTime updatedAt;
+    @Version
+    private long version;
 }

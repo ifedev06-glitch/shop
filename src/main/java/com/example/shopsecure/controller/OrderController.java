@@ -1,37 +1,76 @@
 package com.example.shopsecure.controller;
 
-import com.example.shopsecure.dto.response.OrderResponse;
+import com.example.shopsecure.dto.request.CreateOrderRequest;
+import com.example.shopsecure.dto.request.VendorInfoRequest;
+import com.example.shopsecure.dto.request.VerifyOrderOtpRequest;
+import com.example.shopsecure.dto.response.CreateOrderResponse;
+import com.example.shopsecure.dto.response.OrderDetailsResponse;
+import com.example.shopsecure.dto.response.OrderStatusHistoryResponse;
+import com.example.shopsecure.dto.response.OrderVerificationResponse;
+import com.example.shopsecure.dto.response.PublicOrderResponse;
+import com.example.shopsecure.dto.response.WalletPaymentResponse;
+import com.example.shopsecure.service.OrderPaymentService;
 import com.example.shopsecure.service.OrderService;
-import com.example.shopsecure.service.PaymentService;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
-import org.springframework.data.domain.Page;
-import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 
 @RestController
 @RequestMapping("/orders")
 @RequiredArgsConstructor
-@Slf4j
 public class OrderController {
 
     private final OrderService orderService;
-    private final PaymentService paymentService;
+    private final OrderPaymentService orderPaymentService;
 
-    @GetMapping("/history")
-    public ResponseEntity<Page<OrderResponse>> getOrderHistory(
-            @RequestParam(defaultValue = "0") int page
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    @PreAuthorize("isAuthenticated()")
+    public CreateOrderResponse createOrder(@Valid @RequestBody CreateOrderRequest request) {
+        return orderService.createOrder(request);
+    }
+
+    @GetMapping("/token/{shareToken}")
+    public PublicOrderResponse getByShareToken(@PathVariable String shareToken) {
+        return orderService.getByShareToken(shareToken);
+    }
+
+    @PostMapping("/token/{shareToken}/vendor-info")
+    @ResponseStatus(HttpStatus.ACCEPTED)
+    public OrderVerificationResponse submitVendorInfo(
+            @PathVariable String shareToken,
+            @Valid @RequestBody VendorInfoRequest request
     ) {
-        log.info("Fetching order history: page={}", page);
-        return ResponseEntity.ok(orderService.getOrderHistory(page));
+        return orderService.submitVendorInfo(shareToken, request);
     }
 
-
-    @GetMapping("/payment/verify/{reference}")
-    public ResponseEntity<OrderResponse> getOrderByReference(@PathVariable String reference) {
-        log.info("Payment verification request: reference={}", reference);
-        return ResponseEntity.ok(paymentService.getOrderByReference(reference));
+    @PostMapping("/token/{shareToken}/verify-otp")
+    public OrderVerificationResponse verifyVendorOtp(
+            @PathVariable String shareToken,
+            @Valid @RequestBody VerifyOrderOtpRequest request
+    ) {
+        return orderService.verifyVendorOtp(shareToken, request.code());
     }
 
+    @GetMapping("/{orderId}")
+    public OrderDetailsResponse getOrder(@PathVariable Long orderId) {
+        return orderService.getOrder(orderId);
+    }
+
+    @PostMapping("/{orderId}/pay")
+    public WalletPaymentResponse pay(
+            @PathVariable Long orderId,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey
+    ) {
+        return orderPaymentService.pay(orderId, idempotencyKey);
+    }
+
+    @GetMapping("/{orderId}/history")
+    public List<OrderStatusHistoryResponse> getHistory(@PathVariable Long orderId) {
+        return orderService.getHistory(orderId);
+    }
 }

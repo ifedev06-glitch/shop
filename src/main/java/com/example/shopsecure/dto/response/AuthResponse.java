@@ -15,5 +15,7 @@ public class AuthResponse {
     private String firstname;
     private String lastname;
     private String email;
+    private String phoneNumber;
     private Role role;
+    private VirtualAccountDetailsResponse virtualAccount;
 }

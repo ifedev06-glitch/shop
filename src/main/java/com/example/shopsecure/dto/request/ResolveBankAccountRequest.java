@@ -4,13 +4,13 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
-public record VendorBankAccountRequest(
+public record ResolveBankAccountRequest(
         @NotBlank(message = "Account number is required")
-        @Pattern(regexp = "^\\d{6,20}$", message = "Account number must be 6-20 digits")
+        @Pattern(regexp = "^\\d{10}$", message = "Account number must be 10 digits")
         String accountNumber,
 
-        @NotBlank(message = "Bank name is required")
-        @Size(max = 255)
-        String bankName
+        @NotBlank(message = "Bank code is required")
+        @Size(max = 20)
+        String bankCode
 ) {
 }

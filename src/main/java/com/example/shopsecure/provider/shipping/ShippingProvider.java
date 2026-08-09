@@ -3,13 +3,22 @@ package com.example.shopsecure.provider.shipping;
 import com.example.shopsecure.provider.common.WebhookPayload;
 
 import java.util.List;
+import java.math.BigDecimal;
 
 public interface ShippingProvider {
-    List<ShippingRateOption> getRates(ShipmentRequest request);
+    AddressValidationResult validateAddress(ShipmentAddress address);
 
-    ShipmentResponse createShipment(ShipmentRequest request, String selectedRateId);
+    ShipmentResponse createQuickShipment(ShipmentRequest request);
+
+    List<ShippingRateOption> getRates(String shipmentId, String currency);
+
+    BigDecimal getWalletBalance();
+
+    ShipmentResponse arrangePickup(String shipmentId, String rateId);
 
     ShipmentTrackingStatus trackShipment(String shipmentId);
+
+    ShipmentResponse cancelShipment(String shipmentId);
 
     ShipmentStatusUpdatedEvent handleWebhookEvent(WebhookPayload payload);
 }

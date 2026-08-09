@@ -15,6 +15,7 @@ import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
+import com.example.shopsecure.entity.User;
 
 import java.io.IOException;
 
@@ -63,12 +64,13 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                     SecurityContextHolder.getContext().setAuthentication(authToken);
 
 
-                    // for rate limiter, so each user can get personalized ip bucket//
-                    request.setAttribute("authenticatedUserId", username);
+                    if (userDetails instanceof User user) {
+                        request.setAttribute("authenticatedUserId", user.getId().toString());
+                    }
                 }
             }
         } catch (Exception e) {
-            log.warn("Invalid or expired JWT token: {}", e.getMessage() != null ? e.getMessage() : "unknown error");
+            log.warn("Invalid or expired JWT token");
             // Invalid or expired token — clear context and continue
             // Public routes will still be accessible
             SecurityContextHolder.clearContext();

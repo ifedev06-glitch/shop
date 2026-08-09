@@ -5,6 +5,7 @@ public record ShipmentRequest(
         ShipmentAddress deliveryAddress,
         ParcelDetails parcelDetails,
         ShipmentContact senderContact,
-        ShipmentContact recipientContact
+        ShipmentContact recipientContact,
+        String orderReference
 ) {
 }

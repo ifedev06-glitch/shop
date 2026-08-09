@@ -1,5 +1,6 @@
 package com.example.shopsecure.security;
 
+import com.example.shopsecure.entity.User;
 import io.jsonwebtoken.Claims;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.io.Decoders;
@@ -38,6 +39,7 @@ public class JwtService {
                 .issuer(ISSUER)
                 .id(UUID.randomUUID().toString())
                 .claim("role", role)
+                .claim("ver", userDetails instanceof User user ? user.getAuthVersion() : 0L)
                 .issuedAt(new Date())
                 .expiration(new Date(System.currentTimeMillis() + jwtExpiration))
                 .signWith(getSigningKey(), Jwts.SIG.HS256)
@@ -56,9 +58,14 @@ public class JwtService {
         try {
             Claims claims = extractAllClaims(token);
 
+            Object tokenVersionClaim = claims.get("ver");
+            long tokenVersion = tokenVersionClaim instanceof Number number ? number.longValue() : 0L;
+            long currentVersion = userDetails instanceof User user ? user.getAuthVersion() : 0L;
             return claims.getSubject().equals(userDetails.getUsername())
                     && ISSUER.equals(claims.getIssuer())
-                    && !isTokenExpired(token);
+                    && !isTokenExpired(token)
+                    && userDetails.isEnabled()
+                    && tokenVersion == currentVersion;
 
         } catch (JwtException | IllegalArgumentException e) {
             return false;

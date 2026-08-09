@@ -31,9 +31,9 @@ public class EmailService {
 
         try {
             resend.emails().send(request);
-            log.info("Email sent: to={}, subject={}", to, subject);
+            log.info("Email sent: subject={}", subject);
         } catch (ResendException e) {
-            log.error("Failed to send email: to={}, subject={}", to, subject, e);
+            log.error("Failed to send email: subject={}", subject, e);
             throw new BusinessException("Failed to send email: " + e.getMessage());
         }
     }
@@ -56,9 +56,9 @@ public class EmailService {
 
         try {
             resend.emails().send(request);
-            log.info("Email sent with attachment: to={}, subject={}", to, subject);
+            log.info("Email sent with attachment: subject={}", subject);
         } catch (ResendException e) {
-            log.error("Failed to send email with attachment: to={}, subject={}", to, subject, e);
+            log.error("Failed to send email with attachment: subject={}", subject, e);
             throw new BusinessException("Failed to send email: " + e.getMessage());
         }
     }

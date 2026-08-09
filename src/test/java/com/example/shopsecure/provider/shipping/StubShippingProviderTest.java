@@ -24,23 +24,51 @@ class StubShippingProviderTest {
     );
 
     @Test
-    void returnsRatesCreatesAndTracksShipment() {
+    void validatesAddressAndRunsShipmentLifecycle() {
         ShipmentRequest request = request();
 
-        var rates = provider.getRates(request);
-        assertThat(rates).hasSize(2);
-        assertThat(rates.get(0).carrierName()).isEqualTo("Mock Logistics Standard");
-        assertThat(rates.get(0).cost()).isPositive();
+        assertThat(provider.validateAddress(request.pickupAddress()).valid()).isTrue();
 
-        ShipmentResponse shipment = provider.createShipment(request, rates.get(0).rateId());
+        ShipmentResponse shipment = provider.createQuickShipment(request);
         assertThat(shipment.shipmentId()).startsWith("SHP-MOCK-");
-        assertThat(shipment.trackingReference()).startsWith("TRK-MOCK-");
-        assertThat(provider.trackShipment(shipment.shipmentId()).currentStatus())
-                .isEqualTo(ShipmentStatus.CREATED);
+        assertThat(shipment.status()).isEqualTo(ShipmentStatus.DRAFT);
 
+        var rates = provider.getRates(shipment.shipmentId(), "ngn");
+        assertThat(rates).hasSize(2);
+        assertThat(rates).allSatisfy(rate -> {
+            assertThat(rate.providerRateId()).startsWith(shipment.shipmentId() + ":");
+            assertThat(rate.currency()).isEqualTo("NGN");
+            assertThat(rate.providerAmount()).isPositive();
+        });
+
+        ShipmentResponse arranged = provider.arrangePickup(shipment.shipmentId(), rates.get(0).providerRateId());
+        assertThat(arranged.status()).isEqualTo(ShipmentStatus.CONFIRMED);
+        assertThat(provider.trackShipment(shipment.shipmentId()).currentStatus())
+                .isEqualTo(ShipmentStatus.CONFIRMED);
+
+        ShipmentResponse cancelled = provider.cancelShipment(shipment.shipmentId());
+        assertThat(cancelled.status()).isEqualTo(ShipmentStatus.CANCELLED);
+        assertThat(provider.trackShipment(shipment.shipmentId()).currentStatus())
+                .isEqualTo(ShipmentStatus.CANCELLED);
+    }
+
+    @Test
+    void doesNotAllowRateFromAnotherShipment() {
+        ShipmentResponse first = provider.createQuickShipment(request());
+        ShipmentResponse second = provider.createQuickShipment(request());
+        String firstRate = provider.getRates(first.shipmentId(), "NGN").get(0).providerRateId();
+
+        assertThatThrownBy(() -> provider.arrangePickup(second.shipmentId(), firstRate))
+                .hasMessage("Selected shipping rate is not available for this shipment");
+    }
+
+    @Test
+    void appliesSignedWebhookUpdate() {
+        ShipmentResponse shipment = provider.createQuickShipment(request());
         String body = """
                 {"eventType":"shipment.status.updated","shipmentId":"%s","status":"DELIVERED"}
                 """.formatted(shipment.shipmentId());
+
         ShipmentStatusUpdatedEvent event = provider.handleWebhookEvent(new WebhookPayload(
                 body,
                 Map.of("x-shipping-signature", sign(body))
@@ -72,17 +100,23 @@ class StubShippingProviderTest {
 
     private ShipmentRequest request() {
         return new ShipmentRequest(
-                new ShipmentAddress("1 Vendor Street", null, "Lagos", "Lagos", "Nigeria", null),
-                new ShipmentAddress("2 Buyer Road", null, "Abuja", "FCT", "Nigeria", null),
+                new ShipmentAddress("1 Vendor Street", null, "Lagos", "Lagos", "NG", "100001"),
+                new ShipmentAddress("2 Buyer Road", null, "Abuja", "FCT", "NG", "900001"),
                 new ParcelDetails(
                         new BigDecimal("2.5"),
                         new BigDecimal("40"),
                         new BigDecimal("30"),
                         new BigDecimal("20"),
-                        "Laptop"
+                        "Laptop computer",
+                        "Laptop",
+                        new BigDecimal("750000.00"),
+                        "NGN",
+                        1,
+                        "parcel"
                 ),
-                new ShipmentContact("Vendor", "vendor@example.com", "2348011111111"),
-                new ShipmentContact("Buyer", "buyer@example.com", "2348022222222")
+                new ShipmentContact("Ada", "Vendor", "vendor@example.com", "+2348011111111"),
+                new ShipmentContact("Tobi", "Buyer", "buyer@example.com", "+2348022222222"),
+                "ORDER-123"
         );
     }
 

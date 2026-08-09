@@ -4,9 +4,11 @@ import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.MissingRequestHeaderException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.RequestContextHolder;
@@ -45,6 +47,26 @@ public class GlobalExceptionHandler {
                 .status(400)
                 .error("Validation failed")
                 .details(fieldErrors)
+                .timestamp(LocalDateTime.now())
+                .build());
+    }
+
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<ErrorResponse> handleUnreadableRequest(HttpMessageNotReadableException ex) {
+        log.warn("Malformed request body: path={}", requestPath());
+        return ResponseEntity.badRequest().body(ErrorResponse.builder()
+                .status(400)
+                .error("Malformed request body")
+                .timestamp(LocalDateTime.now())
+                .build());
+    }
+
+    @ExceptionHandler(MissingRequestHeaderException.class)
+    public ResponseEntity<ErrorResponse> handleMissingHeader(MissingRequestHeaderException ex) {
+        log.warn("Required request header missing: path={}, header={}", requestPath(), ex.getHeaderName());
+        return ResponseEntity.badRequest().body(ErrorResponse.builder()
+                .status(400)
+                .error("Required request header is missing: " + ex.getHeaderName())
                 .timestamp(LocalDateTime.now())
                 .build());
     }
@@ -98,6 +120,16 @@ public class GlobalExceptionHandler {
         return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ErrorResponse.builder()
                 .status(401)
                 .error("Invalid email or password")
+                .timestamp(LocalDateTime.now())
+                .build());
+    }
+
+    @ExceptionHandler(EmailNotVerifiedException.class)
+    public ResponseEntity<ErrorResponse> handleEmailNotVerified(EmailNotVerifiedException ex) {
+        log.warn("Unverified account login attempt: path={}", requestPath());
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(ErrorResponse.builder()
+                .status(403)
+                .error(ex.getMessage())
                 .timestamp(LocalDateTime.now())
                 .build());
     }

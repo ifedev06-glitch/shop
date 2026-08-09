@@ -52,8 +52,47 @@ public class OrderStatusService {
 
     private static Map<OrderStatus, Set<OrderStatus>> transitions() {
         Map<OrderStatus, Set<OrderStatus>> transitions = new EnumMap<>(OrderStatus.class);
-        transitions.put(OrderStatus.CREATED, EnumSet.of(OrderStatus.VENDOR_INFO_COMPLETE));
-        transitions.put(OrderStatus.VENDOR_INFO_COMPLETE, EnumSet.of(OrderStatus.PAID_ESCROW));
+        transitions.put(OrderStatus.AWAITING_COUNTERPARTY, EnumSet.of(
+                OrderStatus.AWAITING_SHIPPING_RATE,
+                OrderStatus.CANCELLED
+        ));
+        transitions.put(OrderStatus.AWAITING_SHIPPING_RATE, EnumSet.of(
+                OrderStatus.AWAITING_PAYMENT,
+                OrderStatus.CANCELLED
+        ));
+        transitions.put(OrderStatus.AWAITING_PAYMENT, EnumSet.of(
+                OrderStatus.SHIPMENT_BOOKING,
+                OrderStatus.PAYMENT_FAILED,
+                OrderStatus.CANCELLED
+        ));
+        transitions.put(OrderStatus.PAYMENT_FAILED, EnumSet.of(
+                OrderStatus.AWAITING_PAYMENT,
+                OrderStatus.CANCELLED
+        ));
+        transitions.put(OrderStatus.SHIPMENT_BOOKING, EnumSet.of(
+                OrderStatus.READY_FOR_DELIVERY,
+                OrderStatus.SHIPPING_FAILED,
+                OrderStatus.MANUAL_REVIEW
+        ));
+        transitions.put(OrderStatus.SHIPPING_FAILED, EnumSet.of(
+                OrderStatus.SHIPMENT_BOOKING,
+                OrderStatus.CANCELLED,
+                OrderStatus.MANUAL_REVIEW
+        ));
+        transitions.put(OrderStatus.READY_FOR_DELIVERY, EnumSet.of(
+                OrderStatus.PAYOUT_PENDING,
+                OrderStatus.COMPLETED,
+                OrderStatus.SHIPPING_FAILED
+        ));
+        transitions.put(OrderStatus.PAYOUT_PENDING, EnumSet.of(
+                OrderStatus.COMPLETED,
+                OrderStatus.PAYOUT_FAILED
+        ));
+        transitions.put(OrderStatus.PAYOUT_FAILED, EnumSet.of(
+                OrderStatus.PAYOUT_PENDING,
+                OrderStatus.COMPLETED
+        ));
+        transitions.put(OrderStatus.COMPLETED, EnumSet.of(OrderStatus.PAYOUT_FAILED));
         return Map.copyOf(transitions);
     }
 }

@@ -8,6 +8,7 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriUtils;
 import tools.jackson.databind.JsonNode;
@@ -22,6 +23,7 @@ import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -32,6 +34,8 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
     private static final ParameterizedTypeReference<Map<String, Object>> MAP_TYPE =
             new ParameterizedTypeReference<>() { };
     private static final Pattern TRANSFER_REFERENCE = Pattern.compile("^[a-z0-9_-]{16,50}$");
+    private static final String TEST_ACCOUNT_RESOLUTION_BANK_CODE = "001";
+    private static final String TEST_TRANSFER_BANK_CODE = "057";
 
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
@@ -59,11 +63,19 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
         body.put("amount", toMinorUnits(request.amount()));
         body.put("email", request.customerEmail());
         body.put("reference", request.reference());
+        body.put("currency", request.currency());
+        if (request.callbackUrl() != null && !request.callbackUrl().isBlank()) {
+            body.put("callback_url", request.callbackUrl());
+        }
+        if (request.metadata() != null && !request.metadata().isEmpty()) {
+            body.put("metadata", request.metadata());
+        }
 
         Map<String, Object> data = data(post("/transaction/initialize", body));
         return new PaymentInitResponse(
                 requiredString(data, "authorization_url"),
-                stringValue(data.getOrDefault("reference", request.reference()))
+                requiredString(data, "access_code"),
+                requiredString(data, "reference")
         );
     }
 
@@ -72,19 +84,30 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
         String encodedReference = UriUtils.encodePathSegment(reference, StandardCharsets.UTF_8);
         Map<String, Object> data = data(get("/transaction/verify/" + encodedReference));
         return new PaymentVerificationResult(
+                stringValue(data.get("id")),
+                requiredString(data, "reference"),
                 toStatus(stringValue(data.get("status"))),
                 fromMinorUnits(data.get("amount")),
-                stringValue(data.getOrDefault("reference", reference))
+                stringValue(data.get("currency")),
+                stringValue(data.get("channel")),
+                parseInstant(firstValue(data, "paid_at", "created_at"))
         );
     }
 
     @Override
     public VirtualAccountResponse createVirtualAccount(VirtualAccountRequest request) {
+        if (request.phone() == null || request.phone().isBlank()) {
+            throw new BusinessException("Phone number is required to create a virtual account");
+        }
         String customerCode = findOrCreateCustomer(request);
+        String[] names = splitName(request.customerName());
 
         Map<String, Object> accountRequest = new HashMap<>();
         accountRequest.put("customer", customerCode);
         accountRequest.put("country", "NG");
+        accountRequest.put("first_name", names[0]);
+        accountRequest.put("last_name", names[1]);
+        accountRequest.put("phone", request.phone());
         if (preferredVirtualAccountBank != null && !preferredVirtualAccountBank.isBlank()) {
             accountRequest.put("preferred_bank", preferredVirtualAccountBank);
         }
@@ -122,11 +145,42 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
                 case "charge.abandoned" -> PaymentTransactionStatus.ABANDONED;
                 default -> PaymentTransactionStatus.UNKNOWN;
             };
+            String eventId = firstText(eventData, "id");
+            String reference = firstText(eventData, "reference");
+            JsonNode amountNode = eventData.path("amount");
+            BigDecimal amount = fromMinorUnits(amountNode.isNumber() ? amountNode.numberValue() : null);
+            String currency = firstText(eventData, "currency");
+            String channel = firstNonBlank(
+                    firstText(eventData, "channel"),
+                    firstText(eventData.path("authorization"), "channel")
+            );
+            String receiverAccountNumber = firstNonBlank(
+                    firstText(
+                            eventData.path("authorization"),
+                            "receiver_bank_account_number",
+                            "receiver_account_number"
+                    ),
+                    firstText(eventData.path("dedicated_account"), "account_number")
+            );
+            Instant occurredAt = parseInstant(firstText(eventData, "paid_at", "created_at"));
+
+            if (reference == null || reference.isBlank()) {
+                throw new PaymentException("Invalid payment webhook payload");
+            }
+            if (status == PaymentTransactionStatus.SUCCESS
+                    && (amount == null || currency == null || currency.isBlank())) {
+                throw new PaymentException("Invalid payment webhook payload");
+            }
+
             return new PaymentStatusUpdatedEvent(
-                    eventData.path("reference").asText(),
+                    eventId,
+                    reference,
                     status,
-                    fromMinorUnits(eventData.path("amount").numberValue()),
-                    parseInstant(eventData.path("paid_at").asText(null)),
+                    amount,
+                    currency,
+                    channel,
+                    receiverAccountNumber,
+                    occurredAt,
                     true
             );
         } catch (PaymentException exception) {
@@ -137,7 +191,25 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
     }
 
     @Override
+    public List<Bank> listBanks() {
+        if (isTestMode()) {
+            return List.of(new Bank("Paystack Test Bank", TEST_ACCOUNT_RESOLUTION_BANK_CODE));
+        }
+        return listData(get("/bank?country=nigeria&currency=NGN&type=nuban")).stream()
+                .map(this::mapValue)
+                .filter(bank -> Boolean.TRUE.equals(bank.get("active")))
+                .map(bank -> new Bank(
+                        requiredString(bank, "name"),
+                        requiredString(bank, "code")
+                ))
+                .toList();
+    }
+
+    @Override
     public ResolvedBankAccount resolveBankAccount(BankAccountLookupRequest request) {
+        if (isTestMode() && !TEST_ACCOUNT_RESOLUTION_BANK_CODE.equals(request.bankCode())) {
+            throw new BusinessException("Use Paystack Test Bank while Paystack is in test mode");
+        }
         String accountNumber = UriUtils.encodeQueryParam(request.accountNumber(), StandardCharsets.UTF_8);
         String bankCode = UriUtils.encodeQueryParam(request.bankCode(), StandardCharsets.UTF_8);
         Map<String, Object> data = data(get(
@@ -153,11 +225,14 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
 
     @Override
     public PayoutRecipientResponse createPayoutRecipient(PayoutRecipientRequest request) {
+        String bankCode = isTestMode() && TEST_ACCOUNT_RESOLUTION_BANK_CODE.equals(request.bankCode())
+                ? TEST_TRANSFER_BANK_CODE
+                : request.bankCode();
         Map<String, Object> body = new HashMap<>();
         body.put("type", "nuban");
         body.put("name", request.accountName());
         body.put("account_number", request.accountNumber());
-        body.put("bank_code", request.bankCode());
+        body.put("bank_code", bankCode);
         body.put("currency", "NGN");
         Map<String, Object> data = data(post("/transferrecipient", body));
         return new PayoutRecipientResponse(requiredString(data, "recipient_code"));
@@ -232,7 +307,7 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
     private String findOrCreateCustomer(VirtualAccountRequest request) {
         String encodedEmail = UriUtils.encodePathSegment(request.email(), StandardCharsets.UTF_8);
         try {
-            Map<String, Object> existing = data(get("/customer/" + encodedEmail));
+            Map<String, Object> existing = data(get("/customer/" + encodedEmail, true));
             return requiredString(existing, "customer_code");
         } catch (HttpClientErrorException.NotFound notFound) {
             String[] names = splitName(request.customerName());
@@ -248,23 +323,40 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
     }
 
     private Map<String, Object> get(String path) {
-        ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
-                baseUrl + path,
-                HttpMethod.GET,
-                new HttpEntity<>(headers()),
-                MAP_TYPE
-        );
-        return requireBody(response);
+        return get(path, false);
+    }
+
+    private Map<String, Object> get(String path, boolean preserveNotFound) {
+        try {
+            ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
+                    baseUrl + path,
+                    HttpMethod.GET,
+                    new HttpEntity<>(headers()),
+                    MAP_TYPE
+            );
+            return requireBody(response);
+        } catch (HttpClientErrorException.NotFound exception) {
+            if (preserveNotFound) {
+                throw exception;
+            }
+            throw new PaymentException("Payment provider request failed");
+        } catch (RestClientException exception) {
+            throw new PaymentException("Payment provider request failed");
+        }
     }
 
     private Map<String, Object> post(String path, Map<String, Object> body) {
-        ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
-                baseUrl + path,
-                HttpMethod.POST,
-                new HttpEntity<>(body, headers()),
-                MAP_TYPE
-        );
-        return requireBody(response);
+        try {
+            ResponseEntity<Map<String, Object>> response = restTemplate.exchange(
+                    baseUrl + path,
+                    HttpMethod.POST,
+                    new HttpEntity<>(body, headers()),
+                    MAP_TYPE
+            );
+            return requireBody(response);
+        } catch (RestClientException exception) {
+            throw new PaymentException("Payment provider request failed");
+        }
     }
 
     private HttpHeaders headers() {
@@ -291,6 +383,18 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
             throw new PaymentException("Payment provider response did not contain data");
         }
         return data;
+    }
+
+    private List<?> listData(Map<String, Object> response) {
+        Object status = response.get("status");
+        if (status instanceof Boolean success && !success) {
+            throw new PaymentException(stringValue(response.getOrDefault("message", "Payment provider request failed")));
+        }
+        Object data = response.get("data");
+        if (!(data instanceof List<?> list)) {
+            throw new PaymentException("Payment provider response did not contain data");
+        }
+        return list;
     }
 
     @SuppressWarnings("unchecked")
@@ -323,6 +427,15 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
     private String firstText(JsonNode source, String... keys) {
         for (String key : keys) {
             String value = source.path(key).asText(null);
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private String firstNonBlank(String... values) {
+        for (String value : values) {
             if (value != null && !value.isBlank()) {
                 return value;
             }
@@ -365,6 +478,10 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
             case "pending", "ongoing", "processing", "queued" -> PaymentTransactionStatus.PENDING;
             default -> PaymentTransactionStatus.UNKNOWN;
         };
+    }
+
+    private boolean isTestMode() {
+        return secretKey.startsWith("sk_test_");
     }
 
     private PayoutStatus toPayoutStatus(String status) {

@@ -20,6 +20,9 @@ public class OtpChallenge {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    @Column(unique = true, length = 64)
+    private String publicId;
+
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 40)
     private OtpPurpose purpose;
@@ -27,8 +30,11 @@ public class OtpChallenge {
     @Column(nullable = false, length = 160)
     private String subject;
 
-    @Column(nullable = false, length = 20)
+    @Column(length = 20)
     private String phoneNumber;
+
+    @Column(length = 255)
+    private String email;
 
     @Column(nullable = false)
     private String codeHash;
@@ -40,6 +46,8 @@ public class OtpChallenge {
     private int attempts;
 
     private LocalDateTime consumedAt;
+
+    private LocalDateTime invalidatedAt;
 
     @Column(nullable = false)
     private LocalDateTime createdAt;

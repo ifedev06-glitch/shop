@@ -47,11 +47,22 @@ public class SecurityConfig {
                 .csrf(csrf -> csrf.disable())
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/api/auth/**").permitAll()
-                        .requestMatchers(HttpMethod.GET, "/orders/token/*").permitAll()
-                        .requestMatchers(HttpMethod.POST,
-                                "/orders/token/*/vendor-info",
-                                "/orders/token/*/verify-otp").permitAll()
+                        .requestMatchers(
+                                HttpMethod.POST,
+                                "/api/auth/register",
+                                "/api/auth/verify-email",
+                                "/api/auth/resend-verification",
+                                "/api/auth/login",
+                                "/api/auth/forgot-password",
+                                "/api/auth/reset-password"
+                        ).permitAll()
+                        .requestMatchers(
+                                HttpMethod.POST,
+                                "/api/webhooks/paystack",
+                                "/api/webhooks/terminal"
+                        ).permitAll()
+                        .requestMatchers(HttpMethod.GET, "/api/banks").permitAll()
+                        .requestMatchers("/orders/token/**").permitAll()
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated()
                 )

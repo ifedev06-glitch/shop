@@ -28,12 +28,19 @@ public class User implements UserDetails {
     private String firstname;
     private String lastname;
     private String email;
+    private String phoneNumber;
     private String password;
 
     @Enumerated(EnumType.STRING)
     private Role role;
 
     private LocalDateTime createdAt;
+
+    private LocalDateTime emailVerifiedAt;
+
+    @Builder.Default
+    @Column(nullable = false)
+    private long authVersion = 0;
 
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
@@ -60,5 +67,5 @@ public class User implements UserDetails {
     public boolean isCredentialsNonExpired() { return true; }
 
     @Override
-    public boolean isEnabled() { return true; }
+    public boolean isEnabled() { return emailVerifiedAt != null; }
 }

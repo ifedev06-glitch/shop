@@ -24,8 +24,8 @@ public class Order {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false)
-    private BigDecimal amount;
+    @Column(name = "item_amount", nullable = false)
+    private BigDecimal itemAmount;
 
     @Builder.Default
     @Column(nullable = false, length = 3)
@@ -34,27 +34,44 @@ public class Order {
     @Column(nullable = false, columnDefinition = "TEXT")
     private String itemDescription;
 
+    @Column(nullable = false, length = 100)
+    private String creatorFirstName;
+
+    @Column(nullable = false, length = 100)
+    private String creatorLastName;
+
     @Column(nullable = false, length = 20)
-    private String buyerPhoneNumber;
+    private String creatorPhoneNumber;
 
     @Column(nullable = false)
-    private String buyerEmail;
+    private String creatorEmail;
 
     @Column(nullable = false)
-    private String deliveryAddressLine1;
+    private String creatorAddressLine1;
 
     @Column(nullable = false)
-    private String deliveryCity;
+    private String creatorAddressLine2;
 
     @Column(nullable = false)
-    private String deliveryState;
+    private String creatorCity;
 
     @Column(nullable = false)
-    private String deliveryCountry;
+    private String creatorState;
+
+    @Column(nullable = false)
+    private String creatorCountry;
+
+    @Column(nullable = false, length = 32)
+    private String creatorPostalCode;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 20)
     private CreatorRole creatorRole;
+
+    @Builder.Default
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 30)
+    private OrderFundingMode fundingMode = OrderFundingMode.DIRECT_DVA;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 40)
@@ -67,9 +84,35 @@ public class Order {
     @JoinColumn(name = "creator_id", nullable = false)
     private User creator;
 
-    private String paymentIdempotencyKey;
+    private BigDecimal providerDeliveryFee;
 
-    private Instant paidAt;
+    private BigDecimal deliveryMarkup;
+
+    private BigDecimal deliveryFee;
+
+    private BigDecimal serviceFee;
+
+    private BigDecimal totalAmount;
+
+    @Column(unique = true, length = 80)
+    private String paymentReference;
+
+    @Builder.Default
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 40)
+    private PaymentStatus paymentStatus = PaymentStatus.NOT_STARTED;
+
+    @Builder.Default
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 40)
+    private SettlementStatus settlementStatus = SettlementStatus.NOT_STARTED;
+
+    @Column(name = "paid_at")
+    private Instant fundedAt;
+
+    private Instant deliveryConfirmedAt;
+
+    private Instant completedAt;
 
     @Column(nullable = false)
     private LocalDateTime createdAt;

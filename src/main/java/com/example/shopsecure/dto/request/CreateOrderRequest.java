@@ -1,11 +1,10 @@
 package com.example.shopsecure.dto.request;
 
+import com.example.shopsecure.entity.CreatorRole;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.Digits;
-import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import jakarta.validation.Valid;
 
@@ -21,17 +20,14 @@ public record CreateOrderRequest(
         @Size(max = 2000, message = "Item description must not exceed 2000 characters")
         String itemDescription,
 
-        @NotBlank(message = "Buyer phone number is required")
-        @Pattern(regexp = "^\\d{7,15}$", message = "Phone number must be 7-15 digits")
-        String buyerPhoneNumber,
-
-        @NotBlank(message = "Buyer email is required")
-        @Email(message = "Buyer email must be valid")
-        @Size(max = 255)
-        String buyerEmail,
+        @NotNull(message = "Creator role is required")
+        CreatorRole creatorRole,
 
         @Valid
-        @NotNull(message = "Delivery address is required")
-        OrderAddressRequest deliveryAddress
+        @NotNull(message = "Creator address is required")
+        OrderAddressRequest creatorAddress,
+
+        @Valid
+        OrderParcelRequest parcel
 ) {
 }

@@ -21,10 +21,15 @@ public class RegisterRequest {
 
     @NotBlank(message = "Email is required")
     @Email(message = "Invalid email address")
+    @Size(max = 255, message = "Email cannot exceed 255 characters")
     private String email;
 
+    @NotBlank(message = "Phone number is required")
+    @Pattern(regexp = "^\\d{7,15}$", message = "Phone number must be 7-15 digits")
+    private String phoneNumber;
+
     @NotBlank(message = "Password is required")
-    @Size(min = 8, message = "Password must be at least 8 characters")
+    @Size(min = 8, max = 72, message = "Password must be between 8 and 72 characters")
     @Pattern(
             regexp = "^(?=.*[a-z])(?=.*[A-Z])(?=.*\\d)(?=.*[^A-Za-z0-9]).+$",
             message = "Password must contain uppercase, lowercase, number and special character"

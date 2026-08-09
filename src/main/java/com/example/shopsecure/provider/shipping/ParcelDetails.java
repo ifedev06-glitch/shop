@@ -7,6 +7,11 @@ public record ParcelDetails(
         BigDecimal lengthCm,
         BigDecimal widthCm,
         BigDecimal heightCm,
-        String description
+        String description,
+        String itemName,
+        BigDecimal value,
+        String currency,
+        Integer quantity,
+        String type
 ) {
 }

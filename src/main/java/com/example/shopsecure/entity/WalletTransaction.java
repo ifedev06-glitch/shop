@@ -8,7 +8,8 @@ import java.time.Instant;
 
 @Entity
 @Table(name = "wallet_transactions", indexes = {
-        @Index(name = "idx_wallet_transactions_order_id", columnList = "order_id", unique = true),
+        @Index(name = "idx_wallet_transactions_order_id", columnList = "order_id"),
+        @Index(name = "idx_wallet_transactions_order_type", columnList = "order_id, transaction_type", unique = true),
         @Index(name = "idx_wallet_transactions_reference", columnList = "reference", unique = true)
 })
 @Getter
@@ -26,9 +27,18 @@ public class WalletTransaction {
     @JoinColumn(name = "wallet_id", nullable = false)
     private Wallet wallet;
 
-    @OneToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "order_id", nullable = false, unique = true)
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "order_id")
     private Order order;
+
+    @OneToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "payment_receipt_id", unique = true)
+    private PaymentReceipt paymentReceipt;
+
+    @Builder.Default
+    @Enumerated(EnumType.STRING)
+    @Column(name = "transaction_type", nullable = false, length = 40)
+    private WalletTransactionType transactionType = WalletTransactionType.ORDER_RELEASE;
 
     @Column(nullable = false, unique = true)
     private String reference;
@@ -40,16 +50,10 @@ public class WalletTransaction {
     private BigDecimal amount;
 
     @Column(nullable = false)
-    private BigDecimal availableBalanceBefore;
+    private BigDecimal balanceBefore;
 
     @Column(nullable = false)
-    private BigDecimal availableBalanceAfter;
-
-    @Column(nullable = false)
-    private BigDecimal processingBalanceBefore;
-
-    @Column(nullable = false)
-    private BigDecimal processingBalanceAfter;
+    private BigDecimal balanceAfter;
 
     @Column(nullable = false)
     private Instant createdAt;

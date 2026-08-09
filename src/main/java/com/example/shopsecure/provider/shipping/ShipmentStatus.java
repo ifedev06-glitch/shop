@@ -1,10 +1,10 @@
 package com.example.shopsecure.provider.shipping;
 
 public enum ShipmentStatus {
-    CREATED,
-    PICKED_UP,
+    DRAFT,
+    CONFIRMED,
+    PENDING,
     IN_TRANSIT,
-    OUT_FOR_DELIVERY,
     DELIVERED,
     CANCELLED,
     FAILED,

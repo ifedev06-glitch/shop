@@ -1,6 +1,9 @@
 package com.example.shopsecure.entity;
 
 public enum OtpPurpose {
-    WHATSAPP_LOGIN,
-    ORDER_COUNTERPARTY
+    ORDER_COUNTERPARTY,
+    DELIVERY_CONFIRMATION,
+    ORDER_ACCESS_RECOVERY,
+    EMAIL_VERIFICATION,
+    PASSWORD_RESET
 }

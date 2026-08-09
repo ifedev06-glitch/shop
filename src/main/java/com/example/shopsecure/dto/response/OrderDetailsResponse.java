@@ -1,6 +1,6 @@
 package com.example.shopsecure.dto.response;
 
-import com.example.shopsecure.entity.OrderStatus;
+import com.example.shopsecure.entity.*;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -9,16 +9,22 @@ import java.time.LocalDateTime;
 public record OrderDetailsResponse(
         Long id,
         String itemDescription,
-        BigDecimal amount,
+        BigDecimal itemAmount,
         String currency,
-        String buyerPhoneNumber,
-        String buyerEmail,
-        String deliveryAddressLine1,
-        String deliveryCity,
-        String deliveryState,
-        String deliveryCountry,
+        CreatorRole creatorRole,
+        CreatorRole counterpartyRole,
+        OrderFundingMode fundingMode,
         OrderStatus status,
-        Instant paidAt,
+        PaymentStatus paymentStatus,
+        SettlementStatus settlementStatus,
+        PricingBreakdownResponse pricing,
+        PaymentInstructionsResponse paymentInstructions,
+        CounterpartyResponse counterparty,
+        ParcelResponse parcel,
+        ShippingStatusResponse shipping,
+        Instant fundedAt,
+        Instant deliveryConfirmedAt,
+        Instant completedAt,
         LocalDateTime createdAt,
         Instant updatedAt
 ) {

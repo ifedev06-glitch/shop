@@ -27,11 +27,7 @@ public class Wallet {
 
     @Builder.Default
     @Column(nullable = false)
-    private BigDecimal availableBalance = BigDecimal.ZERO;
-
-    @Builder.Default
-    @Column(nullable = false)
-    private BigDecimal processingBalance = BigDecimal.ZERO;
+    private BigDecimal balance = BigDecimal.ZERO;
 
     @Builder.Default
     @Column(nullable = false, length = 3)

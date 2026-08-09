@@ -61,6 +61,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
         return !enabled
                 || path.startsWith("/actuator")
                 || path.startsWith("/public")
+                || path.startsWith("/api/webhooks/")
                 || path.equals("/health");
     }
 

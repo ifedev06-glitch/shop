@@ -23,8 +23,8 @@ class SecurityRegressionIntegrationTest {
     private MockMvc mockMvc;
 
     @Test
-    void legacyPhoneOnlyJwtEndpointIsNotPublic() throws Exception {
-        mockMvc.perform(get("/api/public/whatsapp-link/2348012345678"))
+    void unknownLegacyPublicEndpointIsNotExposed() throws Exception {
+        mockMvc.perform(get("/api/public/legacy-login/2348012345678"))
                 .andExpect(result -> assertThat(result.getResponse().getStatus()).isIn(401, 403));
     }
 

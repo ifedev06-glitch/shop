@@ -2,12 +2,17 @@ package com.example.shopsecure.provider.payment;
 
 import com.example.shopsecure.exception.BusinessException;
 import com.example.shopsecure.exception.PaymentException;
+import com.example.shopsecure.exception.PayoutRejectedException;
 import com.example.shopsecure.provider.common.WebhookPayload;
+import com.example.shopsecure.util.NigerianPhoneNumber;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Profile;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriUtils;
@@ -20,6 +25,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.HexFormat;
@@ -29,7 +35,9 @@ import java.util.Map;
 import java.util.regex.Pattern;
 
 @Service
-public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider {
+@Profile("!loadtest")
+@Slf4j
+public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider, RefundProvider {
 
     private static final ParameterizedTypeReference<Map<String, Object>> MAP_TYPE =
             new ParameterizedTypeReference<>() { };
@@ -99,20 +107,33 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
         if (request.phone() == null || request.phone().isBlank()) {
             throw new BusinessException("Phone number is required to create a virtual account");
         }
-        String customerCode = findOrCreateCustomer(request);
+        VirtualAccountRequest normalizedRequest = new VirtualAccountRequest(
+                request.customerName(),
+                request.email(),
+                NigerianPhoneNumber.normalize(request.phone()),
+                request.customerReference()
+        );
+        Map<String, Object> customer = findOrCreateCustomer(normalizedRequest);
+        Map<String, Object> existingAccount = mapValue(customer.get("dedicated_account"));
+        if (!existingAccount.isEmpty()) {
+            return toVirtualAccountResponse(existingAccount);
+        }
+        String customerCode = requiredString(customer, "customer_code");
         String[] names = splitName(request.customerName());
 
         Map<String, Object> accountRequest = new HashMap<>();
         accountRequest.put("customer", customerCode);
-        accountRequest.put("country", "NG");
         accountRequest.put("first_name", names[0]);
         accountRequest.put("last_name", names[1]);
-        accountRequest.put("phone", request.phone());
+        accountRequest.put("phone", normalizedRequest.phone());
         if (preferredVirtualAccountBank != null && !preferredVirtualAccountBank.isBlank()) {
             accountRequest.put("preferred_bank", preferredVirtualAccountBank);
         }
 
-        Map<String, Object> data = data(post("/dedicated_account", accountRequest));
+        return toVirtualAccountResponse(data(post("/dedicated_account", accountRequest)));
+    }
+
+    private VirtualAccountResponse toVirtualAccountResponse(Map<String, Object> data) {
         Map<String, Object> bank = mapValue(data.get("bank"));
         return new VirtualAccountResponse(
                 requiredString(data, "account_number"),
@@ -191,6 +212,91 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
     }
 
     @Override
+    public RefundResult initiateRefund(RefundRequest request) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("transaction", request.transactionIdOrReference());
+        body.put("amount", toRefundMinorUnits(request.amount()));
+        body.put("currency", request.currency());
+        body.put("customer_note", request.customerNote());
+        body.put("merchant_note", request.merchantNote());
+        return toRefundResult(data(post("/refund", body)));
+    }
+
+    @Override
+    public RefundResult verifyRefund(String refundId) {
+        String encodedRefundId = UriUtils.encodePathSegment(refundId, StandardCharsets.UTF_8);
+        return toRefundResult(data(get("/refund/" + encodedRefundId)));
+    }
+
+    @Override
+    public RefundStatusUpdatedEvent handleRefundWebhookEvent(WebhookPayload payload) {
+        String signature = payload.header("x-paystack-signature");
+        if (!isValidSignature(payload.rawBody(), signature)) {
+            throw new PaymentException("Invalid webhook signature");
+        }
+
+        try {
+            JsonNode root = objectMapper.readTree(payload.rawBody());
+            String eventType = root.path("event").asText();
+            RefundStatus status = switch (eventType) {
+                case "refund.pending" -> RefundStatus.PENDING;
+                case "refund.processing" -> RefundStatus.PROCESSING;
+                case "refund.needs-attention" -> RefundStatus.NEEDS_ATTENTION;
+                case "refund.failed" -> RefundStatus.FAILED;
+                case "refund.processed" -> RefundStatus.PROCESSED;
+                default -> null;
+            };
+            if (status == null) {
+                return RefundStatusUpdatedEvent.ignored();
+            }
+
+            JsonNode eventData = root.path("data");
+            JsonNode refundData = eventData.path("refund");
+            JsonNode transactionData = eventData.path("transaction");
+            JsonNode refundTransactionData = refundData.path("transaction");
+            Object amount = jsonScalarValue(refundData.path("amount"));
+            if (amount == null) {
+                amount = jsonScalarValue(eventData.path("amount"));
+            }
+            if (amount == null) {
+                amount = jsonScalarValue(transactionData.path("amount"));
+            }
+
+            return new RefundStatusUpdatedEvent(
+                    refundEventKey(eventType, payload.rawBody()),
+                    firstNonBlank(
+                            firstText(eventData, "refund_reference"),
+                            firstText(refundData, "refund_reference")
+                    ),
+                    firstNonBlank(
+                            firstText(eventData, "transaction_reference"),
+                            firstText(transactionData, "reference", "transaction_reference"),
+                            scalarTransactionReference(jsonScalarValue(eventData.path("transaction"))),
+                            firstText(refundData, "transaction_reference"),
+                            firstText(refundTransactionData, "reference", "transaction_reference"),
+                            scalarTransactionReference(jsonScalarValue(refundData.path("transaction")))
+                    ),
+                    fromRefundMinorUnits(amount),
+                    firstNonBlank(
+                            firstText(refundData, "currency"),
+                            firstText(eventData, "currency"),
+                            firstText(transactionData, "currency")
+                    ),
+                    status,
+                    parseInstant(firstNonBlank(
+                            firstText(refundData, "updatedAt", "updated_at", "refunded_at", "createdAt", "created_at"),
+                            firstText(eventData, "occurred_at", "updatedAt", "updated_at", "createdAt", "created_at")
+                    )),
+                    true
+            );
+        } catch (PaymentException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            throw new PaymentException("Invalid refund webhook payload");
+        }
+    }
+
+    @Override
     public List<Bank> listBanks() {
         if (isTestMode()) {
             return List.of(new Bank("Paystack Test Bank", TEST_ACCOUNT_RESOLUTION_BANK_CODE));
@@ -212,7 +318,7 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
         }
         String accountNumber = UriUtils.encodeQueryParam(request.accountNumber(), StandardCharsets.UTF_8);
         String bankCode = UriUtils.encodeQueryParam(request.bankCode(), StandardCharsets.UTF_8);
-        Map<String, Object> data = data(get(
+        Map<String, Object> data = sensitiveData(get(
                 "/bank/resolve?account_number=" + accountNumber + "&bank_code=" + bankCode
         ));
         return new ResolvedBankAccount(
@@ -234,7 +340,7 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
         body.put("account_number", request.accountNumber());
         body.put("bank_code", bankCode);
         body.put("currency", "NGN");
-        Map<String, Object> data = data(post("/transferrecipient", body));
+        Map<String, Object> data = sensitiveData(post("/transferrecipient", body));
         return new PayoutRecipientResponse(requiredString(data, "recipient_code"));
     }
 
@@ -247,11 +353,14 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
         body.put("recipient", request.recipientId());
         body.put("reference", request.reference());
         body.put("reason", request.description());
-        Map<String, Object> data = data(post("/transfer", body));
+        Map<String, Object> data = payoutData(post("/transfer", body));
         return new PayoutResponse(
                 requiredString(data, "transfer_code"),
                 stringValue(data.getOrDefault("reference", request.reference())),
-                toPayoutStatus(stringValue(data.get("status")))
+                toPayoutStatus(stringValue(data.get("status"))),
+                fromMinorUnits(data.get("amount")),
+                stringValue(data.get("currency")),
+                payoutRecipientId(data.get("recipient"))
         );
     }
 
@@ -264,6 +373,9 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
                 stringValue(data.getOrDefault("reference", reference)),
                 stringValue(data.get("transfer_code")),
                 toPayoutStatus(stringValue(data.get("status"))),
+                fromMinorUnits(data.get("amount")),
+                stringValue(data.get("currency")),
+                payoutRecipientId(data.get("recipient")),
                 parseInstant(firstValue(data, "transferred_at", "updatedAt", "updated_at")),
                 true
         );
@@ -294,6 +406,11 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
                     eventData.path("reference").asText(),
                     eventData.path("transfer_code").asText(null),
                     status,
+                    fromMinorUnits(eventData.path("amount").isNumber()
+                            ? eventData.path("amount").numberValue()
+                            : null),
+                    eventData.path("currency").asText(null),
+                    payoutRecipientId(eventData.path("recipient")),
                     parseInstant(firstText(eventData, "transferred_at", "updatedAt", "updated_at")),
                     true
             );
@@ -304,11 +421,10 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
         }
     }
 
-    private String findOrCreateCustomer(VirtualAccountRequest request) {
+    private Map<String, Object> findOrCreateCustomer(VirtualAccountRequest request) {
         String encodedEmail = UriUtils.encodePathSegment(request.email(), StandardCharsets.UTF_8);
         try {
-            Map<String, Object> existing = data(get("/customer/" + encodedEmail, true));
-            return requiredString(existing, "customer_code");
+            return sensitiveData(get("/customer/" + encodedEmail, true));
         } catch (HttpClientErrorException.NotFound notFound) {
             String[] names = splitName(request.customerName());
             Map<String, Object> customerRequest = new HashMap<>();
@@ -317,8 +433,7 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
             customerRequest.put("last_name", names[1]);
             customerRequest.put("phone", request.phone());
             customerRequest.put("metadata", Map.of("customer_reference", request.customerReference()));
-            Map<String, Object> created = data(post("/customer", customerRequest));
-            return requiredString(created, "customer_code");
+            return sensitiveData(post("/customer", customerRequest));
         }
     }
 
@@ -340,6 +455,9 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
                 throw exception;
             }
             throw new PaymentException("Payment provider request failed");
+        } catch (HttpStatusCodeException exception) {
+            logProviderFailure("GET", path, exception);
+            throw new PaymentException("Payment provider request failed");
         } catch (RestClientException exception) {
             throw new PaymentException("Payment provider request failed");
         }
@@ -354,8 +472,57 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
                     MAP_TYPE
             );
             return requireBody(response);
+        } catch (HttpStatusCodeException exception) {
+            logProviderFailure("POST", path, exception);
+            if ("/transfer".equals(path) && isDefinitivePayoutRejection(exception)) {
+                throw new PayoutRejectedException();
+            }
+            throw new PaymentException("Payment provider request failed");
         } catch (RestClientException exception) {
             throw new PaymentException("Payment provider request failed");
+        }
+    }
+
+    private void logProviderFailure(String method, String path, HttpStatusCodeException exception) {
+        boolean sensitiveRequest = path.startsWith("/bank/resolve")
+                || path.startsWith("/transferrecipient")
+                || path.equals("/customer")
+                || path.startsWith("/customer/");
+        String message = sensitiveRequest
+                ? "Sensitive provider request rejected"
+                : "Provider request rejected";
+        log.warn("Paystack request failed: method={}, path={}, status={}, message={}",
+                method, safeProviderPath(path), exception.getStatusCode().value(), message);
+        if (exception.getStatusCode() == HttpStatus.UNAUTHORIZED) {
+            logCredentialDiagnostic();
+        }
+    }
+
+    private void logCredentialDiagnostic() {
+        String configuredKey = secretKey == null ? "" : secretKey;
+        String trimmedKey = configuredKey.trim();
+        String keyMode = trimmedKey.startsWith("sk_live_")
+                ? "live"
+                : trimmedKey.startsWith("sk_test_") ? "test" : "invalid";
+        log.warn("Paystack credential rejected: authorizationScheme=Bearer, keyMode={}, "
+                        + "keyLength={}, trimmedLength={}, surroundingWhitespace={}, "
+                        + "variableAssignmentPrefix={}, bearerPrefix={}, fingerprint={}",
+                keyMode,
+                configuredKey.length(),
+                trimmedKey.length(),
+                !configuredKey.equals(trimmedKey),
+                trimmedKey.startsWith("PAYSTACK_SECRET_KEY="),
+                trimmedKey.regionMatches(true, 0, "Bearer ", 0, "Bearer ".length()),
+                credentialFingerprint(configuredKey));
+    }
+
+    private String credentialFingerprint(String value) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest, 0, 6);
+        } catch (NoSuchAlgorithmException exception) {
+            return "unavailable";
         }
     }
 
@@ -376,7 +543,7 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
     private Map<String, Object> data(Map<String, Object> response) {
         Object status = response.get("status");
         if (status instanceof Boolean success && !success) {
-            throw new PaymentException(stringValue(response.getOrDefault("message", "Payment provider request failed")));
+            throw new PaymentException("Payment provider request failed");
         }
         Map<String, Object> data = mapValue(response.get("data"));
         if (data.isEmpty()) {
@@ -385,10 +552,99 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
         return data;
     }
 
+    private Map<String, Object> sensitiveData(Map<String, Object> response) {
+        if (Boolean.FALSE.equals(response.get("status"))) {
+            throw new PaymentException("Payment provider request failed");
+        }
+        return data(response);
+    }
+
+    private Map<String, Object> payoutData(Map<String, Object> response) {
+        if (Boolean.FALSE.equals(response.get("status"))) {
+            if (isDefinitivePayoutRejectionMessage(stringValue(response.get("message")))) {
+                throw new PayoutRejectedException();
+            }
+            throw new PaymentException("Payment provider request failed");
+        }
+        return data(response);
+    }
+
+    private RefundResult toRefundResult(Map<String, Object> data) {
+        Object transactionValue = data.get("transaction");
+        Map<String, Object> transaction = mapValue(transactionValue);
+        String scalarTransaction = scalarValue(transactionValue);
+        return new RefundResult(
+                requiredString(data, "id"),
+                stringValue(data.get("refund_reference")),
+                firstNonBlank(
+                        stringValue(transaction.get("id")),
+                        stringValue(data.get("transaction_id")),
+                        scalarTransactionId(scalarTransaction)
+                ),
+                firstNonBlank(
+                        stringValue(transaction.get("reference")),
+                        stringValue(data.get("transaction_reference")),
+                        scalarTransactionReference(scalarTransaction)
+                ),
+                fromRefundMinorUnits(data.get("amount")),
+                stringValue(data.get("currency")),
+                toRefundStatus(stringValue(data.get("status"))),
+                stringValue(data.get("merchant_note")),
+                parseInstant(firstValue(data, "updatedAt", "updated_at", "refunded_at", "createdAt", "created_at"))
+        );
+    }
+
+    private boolean isDefinitivePayoutRejection(HttpStatusCodeException exception) {
+        if (exception.getStatusCode() != HttpStatus.BAD_REQUEST
+                && exception.getStatusCode() != HttpStatus.UNPROCESSABLE_ENTITY) {
+            return false;
+        }
+        return isDefinitivePayoutRejectionMessage(providerMessage(exception.getResponseBodyAsString()));
+    }
+
+    private boolean isDefinitivePayoutRejectionMessage(String message) {
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("insufficient balance")
+                || normalized.contains("balance is not enough")
+                || normalized.contains("balance is insufficient")
+                || normalized.contains("invalid recipient")
+                || normalized.contains("recipient does not exist")
+                || normalized.contains("recipient not found");
+    }
+
+    private String providerMessage(String responseBody) {
+        try {
+            String message = objectMapper.readTree(responseBody).path("message").asText(null);
+            return message == null || message.isBlank() ? null : message;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private String safeProviderPath(String path) {
+        if (path.startsWith("/customer/")) {
+            return "/customer/[redacted]";
+        }
+        if (path.startsWith("/transaction/verify/")) {
+            return "/transaction/verify/[redacted]";
+        }
+        if (path.startsWith("/transfer/verify/")) {
+            return "/transfer/verify/[redacted]";
+        }
+        if (path.startsWith("/refund/")) {
+            return "/refund/[redacted]";
+        }
+        int queryStart = path.indexOf('?');
+        return queryStart < 0 ? path : path.substring(0, queryStart) + "?[redacted]";
+    }
+
     private List<?> listData(Map<String, Object> response) {
         Object status = response.get("status");
         if (status instanceof Boolean success && !success) {
-            throw new PaymentException(stringValue(response.getOrDefault("message", "Payment provider request failed")));
+            throw new PaymentException("Payment provider request failed");
         }
         Object data = response.get("data");
         if (!(data instanceof List<?> list)) {
@@ -412,6 +668,20 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
 
     private String stringValue(Object value) {
         return value == null ? null : value.toString();
+    }
+
+    private String scalarValue(Object value) {
+        return value instanceof Map<?, ?> ? null : stringValue(value);
+    }
+
+    private String scalarTransactionId(Object value) {
+        String text = stringValue(value);
+        return text != null && !text.isBlank() && text.chars().allMatch(Character::isDigit) ? text : null;
+    }
+
+    private String scalarTransactionReference(Object value) {
+        String text = stringValue(value);
+        return text != null && !text.isBlank() && !text.chars().allMatch(Character::isDigit) ? text : null;
     }
 
     private Object firstValue(Map<String, Object> source, String... keys) {
@@ -454,6 +724,17 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
         }
     }
 
+    private long toRefundMinorUnits(BigDecimal amount) {
+        if (amount == null || amount.signum() <= 0) {
+            throw new BusinessException("Refund amount must be greater than zero");
+        }
+        try {
+            return amount.movePointRight(2).setScale(0, RoundingMode.UNNECESSARY).longValueExact();
+        } catch (ArithmeticException exception) {
+            throw new BusinessException("Refund amount must have at most two decimal places");
+        }
+    }
+
     private void validateTransferReference(String reference) {
         if (reference == null || !TRANSFER_REFERENCE.matcher(reference).matches()) {
             throw new BusinessException("Payout reference must be 16-50 lowercase letters, digits, dashes, or underscores");
@@ -465,6 +746,46 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
             return null;
         }
         return new BigDecimal(amount.toString()).movePointLeft(2).setScale(2, RoundingMode.UNNECESSARY);
+    }
+
+    private String payoutRecipientId(Object recipient) {
+        Map<String, Object> recipientData = mapValue(recipient);
+        String scalarRecipient = scalarValue(recipient);
+        return firstNonBlank(
+                stringValue(recipientData.get("recipient_code")),
+                stringValue(recipientData.get("recipientCode")),
+                scalarRecipient != null && scalarRecipient.toUpperCase(Locale.ROOT).startsWith("RCP_")
+                        ? scalarRecipient
+                        : null
+        );
+    }
+
+    private String payoutRecipientId(JsonNode recipient) {
+        if (recipient == null || recipient.isNull() || recipient.isMissingNode()) {
+            return null;
+        }
+        if (recipient.isObject()) {
+            return firstText(recipient, "recipient_code", "recipientCode");
+        }
+        String value = recipient.asText(null);
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    private BigDecimal fromRefundMinorUnits(Object amount) {
+        if (amount == null) {
+            return null;
+        }
+        try {
+            BigDecimal converted = new BigDecimal(amount.toString())
+                    .movePointLeft(2)
+                    .setScale(2, RoundingMode.UNNECESSARY);
+            if (converted.signum() < 0) {
+                throw new ArithmeticException("Negative refund amount");
+            }
+            return converted;
+        } catch (NumberFormatException | ArithmeticException exception) {
+            throw new PaymentException("Payment provider returned an invalid refund amount");
+        }
     }
 
     private PaymentTransactionStatus toStatus(String status) {
@@ -498,6 +819,20 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
         };
     }
 
+    private RefundStatus toRefundStatus(String status) {
+        if (status == null) {
+            return RefundStatus.UNKNOWN;
+        }
+        return switch (status.toLowerCase(Locale.ROOT)) {
+            case "pending" -> RefundStatus.PENDING;
+            case "processing" -> RefundStatus.PROCESSING;
+            case "needs-attention", "needs_attention" -> RefundStatus.NEEDS_ATTENTION;
+            case "processed" -> RefundStatus.PROCESSED;
+            case "failed" -> RefundStatus.FAILED;
+            default -> RefundStatus.UNKNOWN;
+        };
+    }
+
     private String[] splitName(String customerName) {
         String normalized = customerName == null ? "Customer" : customerName.trim();
         if (normalized.isBlank()) {
@@ -515,6 +850,23 @@ public class PaystackPaymentProvider implements PaymentProvider, PayoutProvider 
             return Instant.parse(value.toString());
         } catch (Exception exception) {
             return null;
+        }
+    }
+
+    private Object jsonScalarValue(JsonNode value) {
+        if (value == null || value.isMissingNode() || value.isNull() || value.isObject() || value.isArray()) {
+            return null;
+        }
+        return value.isNumber() ? value.numberValue() : value.asText(null);
+    }
+
+    private String refundEventKey(String eventType, String rawBody) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest((eventType + rawBody).getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException("SHA-256 is not available", exception);
         }
     }
 

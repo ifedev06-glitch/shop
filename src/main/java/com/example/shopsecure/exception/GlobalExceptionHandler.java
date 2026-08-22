@@ -14,6 +14,7 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
 import org.springframework.web.servlet.resource.NoResourceFoundException;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 
 import java.time.LocalDateTime;
 import java.util.HashMap;
@@ -28,7 +29,9 @@ public class GlobalExceptionHandler {
         if (attrs != null) {
             HttpServletRequest request = attrs.getRequest();
             String path = request.getRequestURI()
-                    .replaceAll("(/orders/token/)[^/]+", "$1[redacted]");
+                    .replaceAll("(/orders/token/)[^/]+", "$1[redacted]")
+                    .replaceAll("(/orders/tracking/)[^/]+", "$1[redacted]")
+                    .replaceAll("(/waybills/invitations/)[^/]+", "$1[redacted]");
             return request.getMethod() + " " + path;
         }
         return "unknown";
@@ -71,6 +74,16 @@ public class GlobalExceptionHandler {
                 .build());
     }
 
+    @ExceptionHandler(MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ErrorResponse> handleInvalidParameter(MethodArgumentTypeMismatchException ex) {
+        log.warn("Invalid request parameter: path={}, parameter={}", requestPath(), ex.getName());
+        return ResponseEntity.badRequest().body(ErrorResponse.builder()
+                .status(400)
+                .error("Invalid request parameter: " + ex.getName())
+                .timestamp(LocalDateTime.now())
+                .build());
+    }
+
     // ── 404s ─────────────────────────────────────────────────────────────────
     @ExceptionHandler(ResourceNotFoundException.class)
     public ResponseEntity<ErrorResponse> handleNotFound(ResourceNotFoundException ex) {
@@ -92,11 +105,31 @@ public class GlobalExceptionHandler {
     }
 
     // ── Business rule violations ──────────────────────────────────────────────
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<ErrorResponse> handleConflict(ConflictException ex) {
+        log.warn("Conflict: path={}, message={}", requestPath(), ex.getMessage());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(ErrorResponse.builder()
+                .status(409)
+                .error(ex.getMessage())
+                .timestamp(LocalDateTime.now())
+                .build());
+    }
+
     @ExceptionHandler(BusinessException.class)
     public ResponseEntity<ErrorResponse> handleBusiness(BusinessException ex) {
         log.warn("Business rule violation: path={}, message={}", requestPath(), ex.getMessage());
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(ErrorResponse.builder()
                 .status(400)
+                .error(ex.getMessage())
+                .timestamp(LocalDateTime.now())
+                .build());
+    }
+
+    @ExceptionHandler(ServiceUnavailableException.class)
+    public ResponseEntity<ErrorResponse> handleServiceUnavailable(ServiceUnavailableException ex) {
+        log.warn("Service unavailable: path={}, message={}", requestPath(), ex.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).body(ErrorResponse.builder()
+                .status(503)
                 .error(ex.getMessage())
                 .timestamp(LocalDateTime.now())
                 .build());

@@ -10,6 +10,7 @@ import com.example.shopsecure.dto.request.UpdateProfileRequest;
 import com.example.shopsecure.provider.payment.VirtualAccountProvider;
 import com.example.shopsecure.provider.payment.VirtualAccountRequest;
 import com.example.shopsecure.repository.UserRepository;
+import com.example.shopsecure.util.NigerianPhoneNumber;
 
 import java.time.Instant;
 import lombok.RequiredArgsConstructor;
@@ -57,7 +58,7 @@ public class UserService {
         User user = orderService.currentUser();
         user.setFirstname(request.firstname().trim());
         user.setLastname(request.lastname().trim());
-        user.setPhoneNumber(request.phoneNumber().trim());
+        user.setPhoneNumber(NigerianPhoneNumber.normalize(request.phoneNumber()));
         userRepository.save(user);
         if (virtualAccountRepository.findByUser_Id(user.getId()).isEmpty()) {
             var issued = virtualAccountProvider.createVirtualAccount(new VirtualAccountRequest(

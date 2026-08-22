@@ -1,6 +1,7 @@
 package com.example.shopsecure.provider.notification;
 
 import com.example.shopsecure.exception.BusinessException;
+import com.example.shopsecure.util.NigerianPhoneNumber;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -41,7 +42,7 @@ public final class TwilioSmsProvider implements SmsProvider {
         this.restTemplate = Objects.requireNonNull(restTemplate, "RestTemplate is required");
         this.accountSid = requireConfiguration(accountSid, "Twilio account SID is required");
         this.authToken = requireConfiguration(authToken, "Twilio auth token is required");
-        this.fromNumber = normalizePhoneNumber(requireConfiguration(
+        this.fromNumber = normalizeSenderNumber(requireConfiguration(
                 fromNumber,
                 "Twilio sender number is required"
         ));
@@ -69,7 +70,7 @@ public final class TwilioSmsProvider implements SmsProvider {
         }
 
         MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
-        form.add("To", normalizePhoneNumber(phoneNumber));
+        form.add("To", NigerianPhoneNumber.normalize(phoneNumber));
         form.add("From", fromNumber);
         form.add("Body", message);
 
@@ -98,7 +99,7 @@ public final class TwilioSmsProvider implements SmsProvider {
         }
     }
 
-    private static String normalizePhoneNumber(String phoneNumber) {
+    private static String normalizeSenderNumber(String phoneNumber) {
         String normalized = phoneNumber.trim();
         if (!normalized.isEmpty() && normalized.chars().allMatch(Character::isDigit)) {
             return "+" + normalized;

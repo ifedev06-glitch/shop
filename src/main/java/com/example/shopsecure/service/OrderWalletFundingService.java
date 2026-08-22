@@ -26,6 +26,7 @@ public class OrderWalletFundingService {
     private final VirtualAccountRepository virtualAccountRepository;
     private final WalletTransactionRepository transactionRepository;
     private final PaymentReceiptRepository receiptRepository;
+    private final ShippingQuoteRepository quoteRepository;
     private final WalletService walletService;
     private final OrderService orderService;
     private final OrderStatusService statusService;
@@ -60,6 +61,14 @@ public class OrderWalletFundingService {
         }
         if (order.getTotalAmount() == null || order.getTotalAmount().signum() <= 0) {
             throw new BusinessException("Order total is not available");
+        }
+        ShippingQuote selectedQuote = quoteRepository.findByShipment_Order_IdAndStatus(
+                        order.getId(),
+                        ShippingQuoteStatus.SELECTED
+                )
+                .orElseThrow(() -> new BusinessException("Selected shipping quote is not available"));
+        if (!selectedQuote.getExpiresAt().isAfter(Instant.now())) {
+            throw new BusinessException("Selected shipping quote has expired; request fresh rates");
         }
         if (receiptRepository.existsByOrder_IdAndProviderStatus(
                 orderId,

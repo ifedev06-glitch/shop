@@ -2,6 +2,8 @@ package com.example.shopsecure.repository;
 
 import com.example.shopsecure.entity.WalletTransaction;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 
 import java.util.Optional;
 import java.util.List;
@@ -17,5 +19,10 @@ public interface WalletTransactionRepository extends JpaRepository<WalletTransac
 
     Optional<WalletTransaction> findByPaymentReceipt_Id(Long paymentReceiptId);
 
-    List<WalletTransaction> findByWallet_User_IdOrderByCreatedAtDesc(Long userId);
+    Optional<WalletTransaction> findByWithdrawal_IdAndTransactionType(
+            Long withdrawalId,
+            WalletTransactionType transactionType
+    );
+
+    Page<WalletTransaction> findByWallet_User_Id(Long userId, Pageable pageable);
 }

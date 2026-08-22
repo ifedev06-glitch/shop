@@ -10,6 +10,8 @@ import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpMethod;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
@@ -22,13 +24,11 @@ import java.util.concurrent.TimeUnit;
 @Component
 public class RateLimitFilter extends OncePerRequestFilter {
 
+    private static final String CHOWDECK_WEBHOOK_PATH = "/api/webhooks/chowdeck";
+
     private final boolean enabled;
 
-    public RateLimitFilter() {
-        this(true);
-    }
-
-    public RateLimitFilter(boolean enabled) {
+    public RateLimitFilter(@Value("${rate-limit.enabled:true}") boolean enabled) {
         this.enabled = enabled;
     }
 
@@ -61,7 +61,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
         return !enabled
                 || path.startsWith("/actuator")
                 || path.startsWith("/public")
-                || path.startsWith("/api/webhooks/")
+                || isSignedWebhook(request, path)
                 || path.equals("/health");
     }
 
@@ -80,8 +80,11 @@ public class RateLimitFilter extends OncePerRequestFilter {
 
         // 2. Resolve key — prefer authenticated user ID, fall back to IP
         String userId = (String) request.getAttribute("authenticatedUserId");
-        String ip = resolveIp(request);
-        String bucketKey = userId != null ? "user:" + userId : "ip:" + ip;
+        boolean chowdeckWebhook = isChowdeckWebhook(request);
+        String ip = chowdeckWebhook ? request.getRemoteAddr() : resolveIp(request);
+        String bucketKey = chowdeckWebhook
+                ? "ip:" + ip
+                : userId != null ? "user:" + userId : "ip:" + ip;
 
         // 3. Check per-key bucket
         Bucket bucket = buckets.get(bucketKey, k -> createLeakyBucket());
@@ -89,9 +92,19 @@ public class RateLimitFilter extends OncePerRequestFilter {
         if (bucket.tryConsume(1)) {
             chain.doFilter(request, response);
         } else {
-            log.warn("Per-key rate limit hit for key={}", bucketKey);
+            log.warn("Per-key rate limit hit");
             sendTooManyRequests(response, "Too many requests. Please slow down.", 3);
         }
+    }
+
+    private boolean isSignedWebhook(HttpServletRequest request, String path) {
+        return HttpMethod.POST.matches(request.getMethod())
+                && (path.equals("/api/webhooks/paystack") || path.equals("/api/webhooks/terminal"));
+    }
+
+    private boolean isChowdeckWebhook(HttpServletRequest request) {
+        return HttpMethod.POST.matches(request.getMethod())
+                && CHOWDECK_WEBHOOK_PATH.equals(request.getRequestURI());
     }
 
     private String resolveIp(HttpServletRequest request) {

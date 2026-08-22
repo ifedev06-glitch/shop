@@ -1,5 +1,10 @@
 .env
-.git
-.idea
-.vscode
+.env.*
+.git/
+.idea/
+.vscode/
+target/
+postman/
+*.md
 *.iml
+.DS_Store

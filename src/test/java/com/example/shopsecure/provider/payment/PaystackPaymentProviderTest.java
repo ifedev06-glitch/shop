@@ -2,10 +2,15 @@ package com.example.shopsecure.provider.payment;
 
 import com.example.shopsecure.exception.PaymentException;
 import com.example.shopsecure.exception.BusinessException;
+import com.example.shopsecure.exception.PayoutRejectedException;
 import com.example.shopsecure.provider.common.WebhookPayload;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.ResourceAccessException;
@@ -16,6 +21,7 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
@@ -27,6 +33,7 @@ import static org.springframework.test.web.client.ExpectedCount.once;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.*;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.*;
 
+@ExtendWith(OutputCaptureExtension.class)
 class PaystackPaymentProviderTest {
 
     private static final String SECRET = "test-paystack-secret";
@@ -122,6 +129,81 @@ class PaystackPaymentProviderTest {
     }
 
     @Test
+    void initiatesAndVerifiesRefund() {
+        server.expect(once(), requestTo(BASE_URL + "/refund"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header("Authorization", "Bearer " + SECRET))
+                .andExpect(content().json("""
+                        {
+                          "transaction":"T685312322670591",
+                          "amount":12345,
+                          "currency":"NGN",
+                          "customer_note":"Customer requested a refund",
+                          "merchant_note":"Order was cancelled"
+                        }
+                        """))
+                .andRespond(withSuccess("""
+                        {
+                          "status":true,
+                          "data":{
+                            "id":3018284,
+                            "refund_reference":"REFUND_3018284",
+                            "transaction":{"id":1004723697,"reference":"T685312322670591"},
+                            "amount":12345,
+                            "currency":"NGN",
+                            "status":"pending",
+                            "merchant_note":"Order was cancelled",
+                            "updatedAt":"2026-08-10T09:21:17.122Z"
+                          }
+                        }
+                        """, MediaType.APPLICATION_JSON));
+        server.expect(once(), requestTo(BASE_URL + "/refund/3018284"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("""
+                        {
+                          "status":true,
+                          "data":{
+                            "id":3018284,
+                            "refund_reference":null,
+                            "transaction":1004723697,
+                            "transaction_reference":"T685312322670591",
+                            "amount":"12345",
+                            "currency":"NGN",
+                            "status":"needs-attention",
+                            "merchant_note":"Order was cancelled",
+                            "updated_at":"2026-08-11T09:21:17.122Z"
+                          }
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        RefundResult initiated = provider.initiateRefund(new RefundRequest(
+                "T685312322670591",
+                new BigDecimal("123.45"),
+                "NGN",
+                "Customer requested a refund",
+                "Order was cancelled"
+        ));
+        RefundResult verified = provider.verifyRefund(initiated.refundId());
+
+        assertThat(initiated.refundId()).isEqualTo("3018284");
+        assertThat(initiated.refundReference()).isEqualTo("REFUND_3018284");
+        assertThat(initiated.transactionId()).isEqualTo("1004723697");
+        assertThat(initiated.transactionReference()).isEqualTo("T685312322670591");
+        assertThat(initiated.amount()).isEqualByComparingTo("123.45");
+        assertThat(initiated.currency()).isEqualTo("NGN");
+        assertThat(initiated.status()).isEqualTo(RefundStatus.PENDING);
+        assertThat(initiated.merchantNote()).isEqualTo("Order was cancelled");
+        assertThat(initiated.updatedAt()).isEqualTo(Instant.parse("2026-08-10T09:21:17.122Z"));
+        assertThat(verified.refundReference()).isNull();
+        assertThat(verified.transactionId()).isEqualTo("1004723697");
+        assertThat(verified.transactionReference()).isEqualTo("T685312322670591");
+        assertThat(verified.amount()).isEqualByComparingTo("123.45");
+        assertThat(verified.status()).isEqualTo(RefundStatus.NEEDS_ATTENTION);
+        assertThat(verified.updatedAt()).isEqualTo(Instant.parse("2026-08-11T09:21:17.122Z"));
+        server.verify();
+    }
+
+    @Test
     void listsEnabledNigerianNubanBanks() {
         server.expect(once(), requestTo(BASE_URL + "/bank?country=nigeria&currency=NGN&type=nuban"))
                 .andExpect(method(HttpMethod.GET))
@@ -206,7 +288,7 @@ class PaystackPaymentProviderTest {
                           "email":"vendor@example.com",
                           "first_name":"Ada",
                           "last_name":"Vendor",
-                          "phone":"2348012345678",
+                          "phone":"+2348012345678",
                           "metadata":{"customer_reference":"ORDER-123"}
                         }
                         """))
@@ -218,10 +300,9 @@ class PaystackPaymentProviderTest {
                 .andExpect(content().json("""
                         {
                           "customer":"CUS_123",
-                          "country":"NG",
                           "first_name":"Ada",
                           "last_name":"Vendor",
-                          "phone":"2348012345678",
+                          "phone":"+2348012345678",
                           "preferred_bank":"wema-bank"
                         }
                         """))
@@ -262,10 +343,9 @@ class PaystackPaymentProviderTest {
                 .andExpect(content().json("""
                         {
                           "customer":"CUS_EXISTING",
-                          "country":"NG",
                           "first_name":"Ada",
                           "last_name":"Vendor",
-                          "phone":"2348012345678",
+                          "phone":"+2348012345678",
                           "preferred_bank":"wema-bank"
                         }
                         """))
@@ -288,6 +368,37 @@ class PaystackPaymentProviderTest {
         ));
 
         assertThat(account.accountNumber()).isEqualTo("0123456789");
+        server.verify();
+    }
+
+    @Test
+    void reusesExistingDedicatedVirtualAccount() {
+        server.expect(once(), requestTo(BASE_URL + "/customer/vendor@example.com"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("""
+                        {
+                          "status":true,
+                          "data":{
+                            "customer_code":"CUS_EXISTING",
+                            "dedicated_account":{
+                              "account_number":"0123456789",
+                              "account_name":"ADA VENDOR",
+                              "bank":{"name":"Paystack-Titan"}
+                            }
+                          }
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        VirtualAccountResponse account = provider.createVirtualAccount(new VirtualAccountRequest(
+                "Ada Vendor",
+                "vendor@example.com",
+                "2348012345678",
+                "ORDER-123"
+        ));
+
+        assertThat(account.accountNumber()).isEqualTo("0123456789");
+        assertThat(account.bankName()).isEqualTo("Paystack-Titan");
+        assertThat(account.accountName()).isEqualTo("ADA VENDOR");
         server.verify();
     }
 
@@ -404,6 +515,98 @@ class PaystackPaymentProviderTest {
     }
 
     @Test
+    void convertsAllVerifiedRefundWebhooksIntoInternalEvents() throws Exception {
+        Map<String, RefundStatus> statuses = Map.of(
+                "refund.pending", RefundStatus.PENDING,
+                "refund.processing", RefundStatus.PROCESSING,
+                "refund.needs-attention", RefundStatus.NEEDS_ATTENTION,
+                "refund.failed", RefundStatus.FAILED,
+                "refund.processed", RefundStatus.PROCESSED
+        );
+
+        for (Map.Entry<String, RefundStatus> entry : statuses.entrySet()) {
+            String body = """
+                    {
+                      "event":"%s",
+                      "data":{
+                        "status":"%s",
+                        "transaction_reference":"T685312322670591",
+                        "refund_reference":null,
+                        "amount":"12345",
+                        "currency":"NGN",
+                        "updated_at":"2026-08-12T09:21:17.122Z"
+                      }
+                    }
+                    """.formatted(entry.getKey(), entry.getValue().name().toLowerCase());
+
+            RefundStatusUpdatedEvent event = provider.handleRefundWebhookEvent(new WebhookPayload(
+                    body,
+                    Map.of("x-paystack-signature", sign(body))
+            ));
+
+            assertThat(event.relevant()).isTrue();
+            assertThat(event.eventKey()).isEqualTo(sha256(entry.getKey() + body));
+            assertThat(event.refundReference()).isNull();
+            assertThat(event.transactionReference()).isEqualTo("T685312322670591");
+            assertThat(event.amount()).isEqualByComparingTo("123.45");
+            assertThat(event.currency()).isEqualTo("NGN");
+            assertThat(event.status()).isEqualTo(entry.getValue());
+            assertThat(event.occurredAt()).isEqualTo(Instant.parse("2026-08-12T09:21:17.122Z"));
+        }
+    }
+
+    @Test
+    void parsesNestedRefundWebhookData() throws Exception {
+        String body = """
+                {
+                  "event":"refund.processing",
+                  "data":{
+                    "transaction":{"id":1004723697,"reference":"T_NESTED","amount":20000,"currency":"NGN"},
+                    "refund":{
+                      "refund_reference":"REFUND_NESTED",
+                      "amount":9750,
+                      "currency":"GHS",
+                      "updatedAt":"2026-08-13T09:21:17.122Z"
+                    }
+                  }
+                }
+                """;
+
+        RefundStatusUpdatedEvent event = provider.handleRefundWebhookEvent(new WebhookPayload(
+                body,
+                Map.of("x-paystack-signature", sign(body))
+        ));
+
+        assertThat(event.refundReference()).isEqualTo("REFUND_NESTED");
+        assertThat(event.transactionReference()).isEqualTo("T_NESTED");
+        assertThat(event.amount()).isEqualByComparingTo("97.50");
+        assertThat(event.currency()).isEqualTo("GHS");
+        assertThat(event.status()).isEqualTo(RefundStatus.PROCESSING);
+        assertThat(event.occurredAt()).isEqualTo(Instant.parse("2026-08-13T09:21:17.122Z"));
+    }
+
+    @Test
+    void ignoresUnrelatedSignedRefundWebhookAndRejectsInvalidSignature() throws Exception {
+        String body = """
+                {"event":"charge.success","data":{"reference":"T685312322670591"}}
+                """;
+
+        RefundStatusUpdatedEvent ignored = provider.handleRefundWebhookEvent(new WebhookPayload(
+                body,
+                Map.of("x-paystack-signature", sign(body))
+        ));
+
+        assertThat(ignored.relevant()).isFalse();
+        assertThat(ignored.status()).isEqualTo(RefundStatus.UNKNOWN);
+        assertThatThrownBy(() -> provider.handleRefundWebhookEvent(new WebhookPayload(
+                body,
+                Map.of("x-paystack-signature", "invalid")
+        )))
+                .isInstanceOf(PaymentException.class)
+                .hasMessage("Invalid webhook signature");
+    }
+
+    @Test
     void resolvesAccountCreatesRecipientAndInitiatesPayout() {
         server.expect(once(), requestTo(BASE_URL + "/bank/resolve?account_number=0123456789&bank_code=058"))
                 .andExpect(method(HttpMethod.GET))
@@ -438,7 +641,14 @@ class PaystackPaymentProviderTest {
                 .andRespond(withSuccess("""
                         {
                           "status":true,
-                          "data":{"transfer_code":"TRF_123","reference":"payout-order-1234","status":"pending"}
+                          "data":{
+                            "transfer_code":"TRF_123",
+                            "reference":"payout-order-1234",
+                            "status":"pending",
+                            "amount":125000,
+                            "currency":"NGN",
+                            "recipient":31814
+                          }
                         }
                         """, MediaType.APPLICATION_JSON));
         server.expect(once(), requestTo(BASE_URL + "/transfer/verify/payout-order-1234"))
@@ -446,7 +656,14 @@ class PaystackPaymentProviderTest {
                 .andRespond(withSuccess("""
                         {
                           "status":true,
-                          "data":{"transfer_code":"TRF_123","reference":"payout-order-1234","status":"success"}
+                          "data":{
+                            "transfer_code":"TRF_123",
+                            "reference":"payout-order-1234",
+                            "status":"success",
+                            "amount":125000,
+                            "currency":"NGN",
+                            "recipient":{"recipient_code":"RCP_123"}
+                          }
                         }
                         """, MediaType.APPLICATION_JSON));
 
@@ -470,7 +687,11 @@ class PaystackPaymentProviderTest {
         assertThat(account.bankName()).isNull();
         assertThat(recipient.recipientId()).isEqualTo("RCP_123");
         assertThat(payout.status()).isEqualTo(PayoutStatus.PENDING);
+        assertThat(payout.recipientId()).isNull();
         assertThat(verified.status()).isEqualTo(PayoutStatus.SUCCESS);
+        assertThat(verified.amount()).isEqualByComparingTo("1250.00");
+        assertThat(verified.currency()).isEqualTo("NGN");
+        assertThat(verified.recipientId()).isEqualTo("RCP_123");
         server.verify();
     }
 
@@ -501,6 +722,87 @@ class PaystackPaymentProviderTest {
     }
 
     @Test
+    void classifiesStatusFalseTransferResponseAsDefinitiveRejection() {
+        server.expect(once(), requestTo(BASE_URL + "/transfer"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withStatus(HttpStatus.BAD_REQUEST)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("""
+                                {
+                                  "status":false,
+                                  "message":"Your balance is not enough to fulfil this request"
+                                }
+                                """));
+
+        assertThatThrownBy(() -> provider.initiatePayout(new PayoutRequest(
+                "RCP_123",
+                new BigDecimal("1250.00"),
+                "withdrawal-status-false",
+                "Wallet withdrawal"
+        )))
+                .isInstanceOf(PayoutRejectedException.class)
+                .hasMessage("Payment provider rejected payout request")
+                .hasMessageNotContaining("balance");
+        server.verify();
+    }
+
+    @Test
+    void keepsThrottledTransferResponseOnAmbiguousSameReferencePath() {
+        server.expect(once(), requestTo(BASE_URL + "/transfer"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"status\":false,\"message\":\"Too many requests\"}"));
+
+        assertThatThrownBy(() -> provider.initiatePayout(new PayoutRequest(
+                "RCP_123",
+                new BigDecimal("1250.00"),
+                "withdrawal-rate-limited",
+                "Wallet withdrawal"
+        )))
+                .isExactlyInstanceOf(PaymentException.class)
+                .isNotInstanceOf(PayoutRejectedException.class);
+        server.verify();
+    }
+
+    @Test
+    void redactsBankAccountFromProviderFailureLogs(CapturedOutput output) {
+        String accountNumber = "0123456789";
+        server.expect(once(), requestTo(BASE_URL + "/bank/resolve?account_number="
+                        + accountNumber + "&bank_code=058"))
+                .andRespond(withStatus(HttpStatus.INTERNAL_SERVER_ERROR)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"status\":false,\"message\":\"Failed for " + accountNumber + "\"}"));
+
+        assertThatThrownBy(() -> provider.resolveBankAccount(
+                new BankAccountLookupRequest(accountNumber, "058")
+        )).isExactlyInstanceOf(PaymentException.class);
+
+        assertThat(output).doesNotContain(accountNumber);
+        assertThat(output).contains("/bank/resolve?[redacted]");
+        server.verify();
+    }
+
+    @Test
+    void sanitizesSensitiveMessageFromSuccessfulHttpErrorEnvelope() {
+        String accountNumber = "0123456789";
+        server.expect(once(), requestTo(BASE_URL + "/bank/resolve?account_number="
+                        + accountNumber + "&bank_code=058"))
+                .andRespond(withSuccess(
+                        "{\"status\":false,\"message\":\"Invalid account " + accountNumber + "\"}",
+                        MediaType.APPLICATION_JSON
+                ));
+
+        assertThatThrownBy(() -> provider.resolveBankAccount(
+                new BankAccountLookupRequest(accountNumber, "058")
+        ))
+                .isExactlyInstanceOf(PaymentException.class)
+                .hasMessage("Payment provider request failed")
+                .hasMessageNotContaining(accountNumber);
+        server.verify();
+    }
+
+    @Test
     void sanitizesProviderClientErrorsOutsideCustomerLookup() {
         server.expect(once(), requestTo(BASE_URL + "/transaction/verify/PAY-MISSING"))
                 .andRespond(withResourceNotFound()
@@ -515,7 +817,38 @@ class PaystackPaymentProviderTest {
     }
 
     @Test
-    void sanitizesProviderServerErrors() {
+    void logsSafeCredentialDiagnosticWhenPaystackRejectsKey(CapturedOutput output) {
+        server.expect(once(), requestTo(BASE_URL + "/customer/vendor@example.com"))
+                .andRespond(withStatus(HttpStatus.UNAUTHORIZED)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"status\":false,\"message\":\"Invalid key\"}"));
+
+        assertThatThrownBy(() -> provider.createVirtualAccount(new VirtualAccountRequest(
+                "Ada Vendor",
+                "vendor@example.com",
+                "2348012345678",
+                "ORDER-123"
+        )))
+                .isInstanceOf(PaymentException.class)
+                .hasMessage("Payment provider request failed");
+
+        assertThat(output)
+                .contains("Paystack credential rejected")
+                .contains("authorizationScheme=Bearer")
+                .contains("keyMode=invalid")
+                .contains("keyLength=20")
+                .contains("trimmedLength=20")
+                .contains("surroundingWhitespace=false")
+                .contains("variableAssignmentPrefix=false")
+                .contains("bearerPrefix=false")
+                .contains("fingerprint=")
+                .doesNotContain("vendor@example.com")
+                .doesNotContain(SECRET);
+        server.verify();
+    }
+
+    @Test
+    void sanitizesProviderServerErrors(CapturedOutput output) {
         server.expect(once(), requestTo(BASE_URL + "/transaction/verify/PAY-500"))
                 .andRespond(withServerError()
                         .body("upstream failure containing " + SECRET)
@@ -525,6 +858,7 @@ class PaystackPaymentProviderTest {
                 .isInstanceOf(PaymentException.class)
                 .hasMessage("Payment provider request failed")
                 .hasMessageNotContaining(SECRET);
+        assertThat(output).contains("/transaction/verify/[redacted]").doesNotContain("PAY-500");
         server.verify();
     }
 
@@ -598,5 +932,11 @@ class PaystackPaymentProviderTest {
         Mac mac = Mac.getInstance("HmacSHA512");
         mac.init(new SecretKeySpec(SECRET.getBytes(StandardCharsets.UTF_8), "HmacSHA512"));
         return HexFormat.of().formatHex(mac.doFinal(body.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private String sha256(String value) throws Exception {
+        return HexFormat.of().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8))
+        );
     }
 }

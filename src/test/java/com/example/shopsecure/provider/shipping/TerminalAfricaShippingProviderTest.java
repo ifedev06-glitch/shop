@@ -97,6 +97,82 @@ class TerminalAfricaShippingProviderTest {
     }
 
     @Test
+    void acceptsLiveAddressValidationResponseWithoutData() {
+        server.expect(once(), requestTo(BASE_URL + "/addresses/validate"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess("""
+                        {
+                          "status":true,
+                          "message":"Address is valid",
+                          "data":null
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        AddressValidationResult result = provider.validateAddress(new ShipmentAddress(
+                "1121 Allen Avenue, Ikeja",
+                null,
+                "Ikeja",
+                "Lagos",
+                "NG",
+                "100281"
+        ));
+
+        assertThat(result.valid()).isTrue();
+        assertThat(result.suggestedAddress()).isNull();
+        server.verify();
+    }
+
+    @Test
+    void getsAndMapsNigerianStatesAndCities() {
+        server.expect(once(), requestTo(BASE_URL + "/states?country_code=NG"))
+                .andExpect(method(HttpMethod.GET))
+                .andExpect(header("Authorization", "Bearer " + SECRET))
+                .andRespond(withSuccess("""
+                        {
+                          "status":true,
+                          "data":[{
+                            "name":"Lagos",
+                            "isoCode":"LA",
+                            "countryCode":"NG",
+                            "latitude":"6.465422",
+                            "longitude":"3.406448"
+                          }]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+        server.expect(once(), requestTo(BASE_URL + "/cities?country_code=NG"))
+                .andExpect(method(HttpMethod.GET))
+                .andExpect(header("Authorization", "Bearer " + SECRET))
+                .andRespond(withSuccess("""
+                        {
+                          "status":true,
+                          "data":[
+                            {
+                              "name":"Ikeja",
+                              "stateCode":"LA",
+                              "countryCode":"NG",
+                              "latitude":"6.601838",
+                              "longitude":"3.351486"
+                            },
+                            {
+                              "name":"Port Harcourt",
+                              "stateCode":"RI",
+                              "countryCode":"NG"
+                            }
+                          ]
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        assertThat(provider.getStates("ng"))
+                .containsExactly(new ShippingState("Lagos", "LA", "NG"));
+        assertThat(provider.getCities("ng"))
+                .containsExactly(
+                        new ShippingCity("Ikeja", "LA", "NG"),
+                        new ShippingCity("Port Harcourt", "RI", "NG")
+                );
+        server.verify();
+    }
+
+    @Test
     void createsQuickShipmentWithDocumentedPayload() {
         server.expect(once(), requestTo(BASE_URL + "/shipments/quick"))
                 .andExpect(method(HttpMethod.POST))
@@ -159,6 +235,112 @@ class TerminalAfricaShippingProviderTest {
         assertThat(response.shipmentId()).isEqualTo("SH-123");
         assertThat(response.status()).isEqualTo(ShipmentStatus.DRAFT);
         assertThat(response.updatedAt()).isEqualTo(Instant.parse("2026-08-07T10:15:30Z"));
+        server.verify();
+    }
+
+    @Test
+    void normalizesDigitOnlyPhonesToE164WhenCreatingShipment() {
+        server.expect(once(), requestTo(BASE_URL + "/shipments/quick"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(content().json("""
+                        {
+                          "pickup_address":{
+                            "first_name":"Ada",
+                            "last_name":"Vendor",
+                            "email":"vendor@example.com",
+                            "phone":"+2348011111111"
+                          },
+                          "delivery_address":{
+                            "first_name":"Tobi",
+                            "last_name":"Buyer",
+                            "email":"buyer@example.com",
+                            "phone":"+2348022222222"
+                          }
+                        }
+                        """))
+                .andRespond(withSuccess("""
+                        {
+                          "status":true,
+                          "data":{
+                            "shipment_id":"SH-123",
+                            "status":"draft",
+                            "updated_at":"2026-08-07T10:15:30Z"
+                          }
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        provider.createQuickShipment(new ShipmentRequest(
+                new ShipmentAddress("1 Vendor Street", null, "Lagos", "Lagos", "NG", "100001"),
+                new ShipmentAddress("2 Buyer Road", null, "Abuja", "FCT", "NG", "900001"),
+                new ParcelDetails(
+                        new BigDecimal("2.5"),
+                        new BigDecimal("40"),
+                        new BigDecimal("30"),
+                        new BigDecimal("20"),
+                        "Laptop computer",
+                        "Laptop",
+                        new BigDecimal("750000.00"),
+                        "NGN",
+                        1,
+                        "parcel"
+                ),
+                new ShipmentContact("Ada", "Vendor", "vendor@example.com", "2348011111111"),
+                new ShipmentContact("Tobi", "Buyer", "buyer@example.com", "2348022222222"),
+                "ORDER-123"
+        ));
+        server.verify();
+    }
+
+    @Test
+    void convertsLeadingZeroLocalPhonesUsingAddressCountry() {
+        server.expect(once(), requestTo(BASE_URL + "/shipments/quick"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(content().json("""
+                        {
+                          "pickup_address":{
+                            "first_name":"Ada",
+                            "last_name":"Vendor",
+                            "email":"vendor@example.com",
+                            "phone":"+2348011111111"
+                          },
+                          "delivery_address":{
+                            "first_name":"Tobi",
+                            "last_name":"Buyer",
+                            "email":"buyer@example.com",
+                            "phone":"+2348022222222"
+                          }
+                        }
+                        """))
+                .andRespond(withSuccess("""
+                        {
+                          "status":true,
+                          "data":{
+                            "shipment_id":"SH-123",
+                            "status":"draft",
+                            "updated_at":"2026-08-07T10:15:30Z"
+                          }
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        provider.createQuickShipment(new ShipmentRequest(
+                new ShipmentAddress("1 Vendor Street", null, "Lagos", "Lagos", "NG", "100001"),
+                new ShipmentAddress("2 Buyer Road", null, "Abuja", "FCT", "NG", "900001"),
+                new ParcelDetails(
+                        new BigDecimal("2.5"),
+                        new BigDecimal("40"),
+                        new BigDecimal("30"),
+                        new BigDecimal("20"),
+                        "Laptop computer",
+                        "Laptop",
+                        new BigDecimal("750000.00"),
+                        "NGN",
+                        1,
+                        "parcel"
+                ),
+                new ShipmentContact("Ada", "Vendor", "vendor@example.com", "+08011111111"),
+                new ShipmentContact("Tobi", "Buyer", "buyer@example.com", "+23408022222222"),
+                "ORDER-123"
+        ));
         server.verify();
     }
 
@@ -273,6 +455,10 @@ class TerminalAfricaShippingProviderTest {
                           "data":{
                             "shipment_id":"SH-123",
                             "status":"in_transit",
+                            "extras":{
+                              "tracking_number":"TRACK-123",
+                              "tracking_url":"https://tracking.test/TRACK-123"
+                            },
                             "events":[
                               {
                                 "status":"confirmed",
@@ -314,6 +500,8 @@ class TerminalAfricaShippingProviderTest {
         assertThat(tracking.currentStatus()).isEqualTo(ShipmentStatus.IN_TRANSIT);
         assertThat(tracking.lastUpdated()).isEqualTo(Instant.parse("2026-08-07T12:00:00Z"));
         assertThat(tracking.history()).hasSize(2);
+        assertThat(tracking.trackingReference()).isEqualTo("TRACK-123");
+        assertThat(tracking.trackingUrl()).isEqualTo("https://tracking.test/TRACK-123");
         assertThat(cancelled.status()).isEqualTo(ShipmentStatus.CANCELLED);
         server.verify();
     }
@@ -351,7 +539,11 @@ class TerminalAfricaShippingProviderTest {
     @Test
     void derivesStatusFromWebhookEventNameAndIgnoresOtherEvents() throws Exception {
         String deliveredBody = """
-                {"event":"shipment.delivered","data":{"shipment":{"shipment_id":"SH-123"}}}
+                {
+                  "event":"shipment.delivered",
+                  "occurred_at":"2026-08-07T13:00:00Z",
+                  "data":{"shipment":{"shipment_id":"SH-123"}}
+                }
                 """;
         ShipmentStatusUpdatedEvent delivered = provider.handleWebhookEvent(new WebhookPayload(
                 deliveredBody,
@@ -366,6 +558,31 @@ class TerminalAfricaShippingProviderTest {
 
         assertThat(delivered.status()).isEqualTo(ShipmentStatus.DELIVERED);
         assertThat(ignored.relevant()).isFalse();
+    }
+
+    @Test
+    void rejectsRelevantWebhookWithoutParseableTimestamp() throws Exception {
+        String missingTimestamp = """
+                {"event":"shipment.cancelled","data":{"shipment":{"shipment_id":"SH-123"}}}
+                """;
+        String invalidTimestamp = """
+                {
+                  "event":"shipment.delivered",
+                  "occurred_at":"not-a-timestamp",
+                  "data":{"shipment":{"shipment_id":"SH-123"}}
+                }
+                """;
+
+        assertThatThrownBy(() -> provider.handleWebhookEvent(new WebhookPayload(
+                missingTimestamp,
+                Map.of("X-Terminal-Signature", sign(missingTimestamp))
+        ))).isInstanceOf(BusinessException.class)
+                .hasMessage("Invalid Terminal Africa webhook timestamp");
+        assertThatThrownBy(() -> provider.handleWebhookEvent(new WebhookPayload(
+                invalidTimestamp,
+                Map.of("X-Terminal-Signature", sign(invalidTimestamp))
+        ))).isInstanceOf(BusinessException.class)
+                .hasMessage("Invalid Terminal Africa webhook timestamp");
     }
 
     @Test

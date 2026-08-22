@@ -21,7 +21,7 @@ public record OrderAddressRequest(
         String state,
 
         @NotBlank(message = "Country is required")
-        @Pattern(regexp = "^[A-Za-z]{2}$", message = "Country must be an ISO-2 country code")
+        @Pattern(regexp = "(?i)^NG$", message = "Only Nigerian shipping addresses are supported")
         String country,
 
         @NotBlank(message = "Postal code is required")

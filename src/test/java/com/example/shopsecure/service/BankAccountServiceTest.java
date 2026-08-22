@@ -17,7 +17,7 @@ import static org.mockito.Mockito.when;
 class BankAccountServiceTest {
 
     @Test
-    void reusesRecentResolutionForTheFinalCounterpartySubmission() {
+    void doesNotRetainRawAccountResolutionBetweenRequests() {
         PayoutProvider payoutProvider = mock(PayoutProvider.class);
         BankAccountLookupRequest lookup = new BankAccountLookupRequest("0123456789", "999");
         when(payoutProvider.listBanks()).thenReturn(List.of(new Bank("Test Bank", "999")));
@@ -34,6 +34,6 @@ class BankAccountServiceTest {
 
         assertThat(first).isEqualTo(repeated);
         assertThat(repeated.bankName()).isEqualTo("Test Bank");
-        verify(payoutProvider, times(1)).resolveBankAccount(lookup);
+        verify(payoutProvider, times(2)).resolveBankAccount(lookup);
     }
 }

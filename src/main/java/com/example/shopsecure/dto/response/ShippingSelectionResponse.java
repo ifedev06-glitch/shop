@@ -8,6 +8,7 @@ public record ShippingSelectionResponse(
         OrderFundingMode fundingMode,
         ShippingQuoteResponse selectedQuote,
         PricingBreakdownResponse pricing,
-        PaymentInstructionsResponse paymentInstructions
+        PaymentInstructionsResponse paymentInstructions,
+        String buyerPaymentLink
 ) {
 }

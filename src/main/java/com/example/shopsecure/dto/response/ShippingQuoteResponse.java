@@ -1,6 +1,7 @@
 package com.example.shopsecure.dto.response;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 
 public record ShippingQuoteResponse(
         Long quoteId,
@@ -12,6 +13,7 @@ public record ShippingQuoteResponse(
         BigDecimal totalAmount,
         String currency,
         String pickupEstimate,
-        String deliveryEstimate
+        String deliveryEstimate,
+        Instant expiresAt
 ) {
 }

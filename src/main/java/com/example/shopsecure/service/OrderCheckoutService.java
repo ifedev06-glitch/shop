@@ -13,6 +13,7 @@ import com.example.shopsecure.provider.payment.PaymentTransactionStatus;
 import com.example.shopsecure.provider.payment.PaymentVerificationResult;
 import com.example.shopsecure.repository.OrderPaymentAttemptRepository;
 import com.example.shopsecure.repository.OrderRepository;
+import com.example.shopsecure.repository.ShippingQuoteRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.access.AccessDeniedException;
@@ -31,6 +32,7 @@ public class OrderCheckoutService {
     private final GuestOrderAccessService guestAccessService;
     private final OrderRepository orderRepository;
     private final OrderPaymentAttemptRepository attemptRepository;
+    private final ShippingQuoteRepository quoteRepository;
     private final PaymentProvider paymentProvider;
     private final OrderPaymentService paymentService;
 
@@ -50,6 +52,7 @@ public class OrderCheckoutService {
                 || order.getPaymentStatus() != PaymentStatus.PENDING) {
             throw new BusinessException("Order is not awaiting checkout payment");
         }
+        requireActiveSelectedQuote(order);
 
         OrderPaymentAttempt existing = attemptRepository
                 .findFirstByOrder_IdAndStatusOrderByCreatedAtDesc(
@@ -151,6 +154,17 @@ public class OrderCheckoutService {
                 || order.getCreatorRole() != CreatorRole.VENDOR
                 || order.getFundingMode() != OrderFundingMode.PAYSTACK_CHECKOUT) {
             throw new AccessDeniedException("This order is not payable through guest checkout");
+        }
+    }
+
+    private void requireActiveSelectedQuote(Order order) {
+        ShippingQuote quote = quoteRepository.findByShipment_Order_IdAndStatus(
+                        order.getId(),
+                        ShippingQuoteStatus.SELECTED
+                )
+                .orElseThrow(() -> new BusinessException("Selected shipping quote is not available"));
+        if (!quote.getExpiresAt().isAfter(Instant.now())) {
+            throw new BusinessException("Selected shipping quote has expired; creator must request fresh rates");
         }
     }
 

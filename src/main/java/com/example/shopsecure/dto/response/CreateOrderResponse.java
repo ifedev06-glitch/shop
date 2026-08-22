@@ -1,6 +1,7 @@
 package com.example.shopsecure.dto.response;
 
 import com.example.shopsecure.entity.CreatorRole;
+import com.example.shopsecure.entity.EscrowReleasePolicy;
 import com.example.shopsecure.entity.OrderStatus;
 import com.example.shopsecure.entity.OrderFundingMode;
 
@@ -15,9 +16,8 @@ public record CreateOrderResponse(
         CreatorRole creatorRole,
         CreatorRole counterpartyRole,
         OrderFundingMode fundingMode,
+        EscrowReleasePolicy escrowReleasePolicy,
         OrderStatus status,
-        String shareToken,
-        String shareableLink,
         LocalDateTime createdAt
 ) {
 }

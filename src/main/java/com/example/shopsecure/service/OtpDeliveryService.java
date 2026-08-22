@@ -48,6 +48,8 @@ public class OtpDeliveryService {
             case DELIVERY_CONFIRMATION -> "confirm delivery";
             case ORDER_ACCESS_RECOVERY -> "restore access to your order";
             case ORDER_COUNTERPARTY -> "verify your order details";
+            case WAYBILL_INVITATION -> "verify your waybill invitation";
+            case WALLET_WITHDRAWAL -> "authorize your wallet withdrawal";
             case EMAIL_VERIFICATION -> "verify your email address";
             case PASSWORD_RESET -> "reset your password";
         };

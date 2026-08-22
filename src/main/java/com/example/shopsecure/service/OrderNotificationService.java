@@ -6,6 +6,7 @@ import com.example.shopsecure.entity.OrderCounterparty;
 import com.example.shopsecure.entity.PaymentStatus;
 import com.example.shopsecure.entity.SettlementStatus;
 import com.example.shopsecure.entity.SettlementType;
+import com.example.shopsecure.entity.SettlementTrigger;
 import com.example.shopsecure.event.CounterpartyVerifiedEvent;
 import com.example.shopsecure.event.OrderFundedEvent;
 import com.example.shopsecure.event.VendorSettlementCompletedEvent;
@@ -34,6 +35,7 @@ public class OrderNotificationService {
     private final OrderCounterpartyRepository counterpartyRepository;
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @Async
     public void sendCounterpartyVerifiedEmail(CounterpartyVerifiedEvent event) {
         try {
             String counterparty = event.counterpartyRole() == CreatorRole.VENDOR ? "Seller" : "Buyer";
@@ -115,6 +117,7 @@ public class OrderNotificationService {
     }
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @Async
     public void sendSettlementCompletedNotifications(VendorSettlementCompletedEvent event) {
         Order order = orderRepository.findById(event.orderId()).orElse(null);
         if (order == null || order.getSettlementStatus() != SettlementStatus.COMPLETED) {
@@ -134,11 +137,14 @@ public class OrderNotificationService {
                 ? new Participant(order.getCreatorFirstName(), order.getCreatorEmail(), order.getCreatorPhoneNumber())
                 : new Participant(counterparty.getFirstName(), counterparty.getEmail(), counterparty.getPhoneNumber());
         boolean externalPayout = event.settlementType() == SettlementType.EXTERNAL_PAYOUT;
+        boolean carrierPickup = event.trigger() == SettlementTrigger.CARRIER_PICKUP;
         String formattedAmount = formatAmount(order.getItemAmount(), order.getCurrency());
 
         sendEmail(
                 vendor.email(),
-                externalPayout
+                carrierPickup
+                        ? "Carrier pickup confirmed - bank payout completed"
+                        : externalPayout
                         ? "Buyer confirmed delivery - account credited"
                         : "Buyer confirmed delivery - wallet credited",
                 emailTemplateService.vendorSettlementCompletedBody(
@@ -146,14 +152,18 @@ public class OrderNotificationService {
                         order.getItemDescription(),
                         order.getItemAmount(),
                         order.getCurrency(),
-                        event.settlementType()
+                        event.settlementType(),
+                        event.trigger()
                 ),
                 event.orderId(),
                 "vendor"
         );
         sendSms(
                 vendor.phoneNumber(),
-                "ShopSecure: The buyer has confirmed delivery. Your "
+                carrierPickup
+                        ? "ShopSecure: Carrier pickup is confirmed. Your bank payout of "
+                        + formattedAmount + " is complete."
+                        : "ShopSecure: The buyer has confirmed delivery. Your "
                         + (externalPayout ? "account" : "ShopSecure wallet")
                         + " has been credited with " + formattedAmount + ".",
                 event.orderId(),
@@ -161,19 +171,25 @@ public class OrderNotificationService {
         );
         sendEmail(
                 buyer.email(),
-                "Thank you for confirming delivery - vendor credited",
+                carrierPickup
+                        ? "Package picked up - vendor payment released"
+                        : "Thank you for confirming delivery - vendor credited",
                 emailTemplateService.buyerSettlementCompletedBody(
                         buyer.firstName(),
                         order.getItemDescription(),
                         order.getItemAmount(),
-                        order.getCurrency()
+                        order.getCurrency(),
+                        event.trigger()
                 ),
                 event.orderId(),
                 "buyer"
         );
         sendSms(
                 buyer.phoneNumber(),
-                "ShopSecure: Thank you for confirming delivery. The vendor has been credited with "
+                carrierPickup
+                        ? "ShopSecure: Carrier pickup is confirmed. The vendor bank payout of "
+                        + formattedAmount + " is complete. Track the package for delivery updates."
+                        : "ShopSecure: Thank you for confirming delivery. The vendor has been credited with "
                         + formattedAmount + ".",
                 event.orderId(),
                 "buyer"

@@ -9,7 +9,12 @@ import java.time.Instant;
 @Entity
 @Table(name = "order_settlements", indexes = {
         @Index(name = "idx_order_settlements_order_id", columnList = "order_id", unique = true),
-        @Index(name = "idx_order_settlements_payout_reference", columnList = "payout_reference", unique = true)
+        @Index(name = "idx_order_settlements_payout_reference", columnList = "payout_reference", unique = true),
+        @Index(name = "idx_order_settlements_transfer_id", columnList = "transfer_id", unique = true),
+        @Index(
+                name = "idx_order_settlements_reconciliation_due",
+                columnList = "settlement_type, status, next_reconciliation_at, id"
+        )
 })
 @Getter
 @Setter
@@ -40,6 +45,15 @@ public class OrderSettlement {
     @Column(nullable = false)
     private String idempotencyKey;
 
+    @Builder.Default
+    @Enumerated(EnumType.STRING)
+    @Column(name = "trigger_type", nullable = false, length = 40)
+    private SettlementTrigger trigger = SettlementTrigger.BUYER_DELIVERY_CONFIRMATION;
+
+    @Builder.Default
+    @Column(nullable = false)
+    private Instant triggeredAt = Instant.now();
+
     @Column(nullable = false, unique = true, length = 80)
     private String payoutReference;
 
@@ -53,6 +67,17 @@ public class OrderSettlement {
     private String failureReason;
 
     private Instant providerUpdatedAt;
+
+    private Instant nextReconciliationAt;
+
+    @Column(length = 64)
+    private String reconciliationToken;
+
+    @Column(length = 255)
+    private String unexpectedPayoutReference;
+
+    @Column(length = 100)
+    private String unexpectedTransferId;
 
     @Column(nullable = false)
     private Instant createdAt;

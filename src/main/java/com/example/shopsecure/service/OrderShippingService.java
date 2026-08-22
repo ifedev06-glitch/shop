@@ -7,10 +7,10 @@ import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.provider.common.WebhookPayload;
 import com.example.shopsecure.provider.shipping.*;
 import com.example.shopsecure.repository.*;
+import com.example.shopsecure.util.TrackingUrl;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.annotation.Propagation;
@@ -23,6 +23,7 @@ import java.time.Duration;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 
 @Service
@@ -30,7 +31,14 @@ import java.util.UUID;
 @Slf4j
 public class OrderShippingService {
 
+    private static final Set<ShipmentStatus> ACTIVE_TRACKING_STATUSES = Set.of(
+            ShipmentStatus.PENDING,
+            ShipmentStatus.CONFIRMED,
+            ShipmentStatus.IN_TRANSIT
+    );
+
     private final ShippingProvider shippingProvider;
+    private final ShippingProviderRoutingService shippingRoutingService;
     private final OrderRepository orderRepository;
     private final OrderCounterpartyRepository counterpartyRepository;
     private final OrderParcelRepository parcelRepository;
@@ -43,10 +51,8 @@ public class OrderShippingService {
     private final OrderPricingService pricingService;
     private final OrderStatusService statusService;
     private final OrderService orderService;
-    private final GuestOrderAccessService guestAccessService;
-
-    @Value("${shipping.terminal-africa.enabled:false}")
-    private boolean terminalEnabled;
+    private final OrderTrackingService trackingService;
+    private final OrderSettlementService settlementService;
 
     @Value("${shipping.quote-ttl:PT15M}")
     private Duration quoteTtl;
@@ -57,23 +63,11 @@ public class OrderShippingService {
     @Value("${shipping.booking-reconciliation.retry-delay:PT5M}")
     private Duration bookingRetryDelay;
 
-    @Transactional
+    @Transactional(noRollbackFor = PaymentReviewRequiredException.class)
     public List<ShippingQuoteResponse> createCreatorQuotes(Long orderId) {
         Order order = requireOrderForUpdate(orderId);
         orderService.requireOwner(order);
-        if (order.getCreatorRole() != CreatorRole.BUYER) {
-            throw new AccessDeniedException("Only the buyer can request shipping quotes");
-        }
-        return createQuotes(order);
-    }
-
-    @Transactional
-    public List<ShippingQuoteResponse> createGuestQuotes(String shareToken, String guestToken) {
-        GuestOrderAccessToken access = guestAccessService.require(shareToken, guestToken);
-        Order order = requireOrderForUpdate(access.getOrder().getId());
-        if (order.getCreatorRole() != CreatorRole.VENDOR) {
-            throw new AccessDeniedException("Only the buyer can request shipping quotes");
-        }
+        resetExpiredPaymentSelection(order, Instant.now());
         return createQuotes(order);
     }
 
@@ -81,23 +75,6 @@ public class OrderShippingService {
     public ShippingSelectionResponse selectCreatorQuote(Long orderId, Long quoteId) {
         Order order = requireOrderForUpdate(orderId);
         orderService.requireOwner(order);
-        if (order.getCreatorRole() != CreatorRole.BUYER) {
-            throw new AccessDeniedException("Only the buyer can select a shipping quote");
-        }
-        return selectQuote(order, quoteId);
-    }
-
-    @Transactional
-    public ShippingSelectionResponse selectGuestQuote(
-            String shareToken,
-            String guestToken,
-            Long quoteId
-    ) {
-        GuestOrderAccessToken access = guestAccessService.require(shareToken, guestToken);
-        Order order = requireOrderForUpdate(access.getOrder().getId());
-        if (order.getCreatorRole() != CreatorRole.VENDOR) {
-            throw new AccessDeniedException("Only the buyer can select a shipping quote");
-        }
         return selectQuote(order, quoteId);
     }
 
@@ -109,6 +86,7 @@ public class OrderShippingService {
         }
         if (order.getStatus() == OrderStatus.READY_FOR_DELIVERY
                 || order.getStatus() == OrderStatus.PAYOUT_PENDING
+                || order.getStatus() == OrderStatus.IN_TRANSIT
                 || order.getStatus() == OrderStatus.COMPLETED) {
             return;
         }
@@ -122,14 +100,25 @@ public class OrderShippingService {
                 && shipment.getNextBookingAttemptAt().isAfter(Instant.now())) {
             return;
         }
-        if (!providerDraftCanBeBooked(order, shipment)) {
+        ShippingProvider shipmentProvider = shippingRoutingService.require(shipment.getProvider());
+        if (!isChowdeck(shipment.getProvider())
+                && !providerDraftCanBeBooked(order, shipment, shipmentProvider)) {
             return;
         }
-        if (order.getStatus() == OrderStatus.SHIPPING_FAILED) {
-            statusService.transition(order, OrderStatus.SHIPMENT_BOOKING, "Retrying shipment booking");
-        }
-
         if (shipment.getBookingAttempt() >= maxBookingAttempts) {
+            if (isChowdeck(shipment.getProvider())) {
+                try {
+                    ShipmentTrackingStatus tracking = requireTrackingStatus(
+                            shipment.getProviderShipmentId(),
+                            shipmentProvider.trackShipment(shipment.getProviderShipmentId())
+                    );
+                    if (!applyProviderDraftState(order, shipment, tracking)) {
+                        return;
+                    }
+                } catch (RuntimeException ignored) {
+                    // Fall through to manual review when final reconciliation is unavailable.
+                }
+            }
             shipment.setFailureReason("Automated shipment booking retry limit reached");
             shipment.setNextBookingAttemptAt(null);
             shipment.setUpdatedAt(Instant.now());
@@ -138,24 +127,50 @@ public class OrderShippingService {
             orderRepository.save(order);
             return;
         }
+        if (order.getStatus() == OrderStatus.SHIPPING_FAILED) {
+            statusService.transition(order, OrderStatus.SHIPMENT_BOOKING, "Retrying shipment booking");
+        }
         ShippingQuote quote = selectedQuote(orderId);
         shipment.setBookingAttempt(shipment.getBookingAttempt() + 1);
         shipment.setNextBookingAttemptAt(null);
         shipment.setFailureReason(null);
         shipment.setUpdatedAt(Instant.now());
         shipmentRepository.save(shipment);
+        boolean carrierPickupConfirmed = false;
         try {
-            BigDecimal providerWalletBalance = shippingProvider.getWalletBalance();
+            BigDecimal providerWalletBalance = shipmentProvider.getWalletBalance();
             if (providerWalletBalance != null
                     && providerWalletBalance.compareTo(quote.getProviderAmount()) < 0) {
                 throw new BusinessException("Shipping provider wallet requires funding before booking");
             }
-            ShipmentResponse response = shippingProvider.arrangePickup(
-                    shipment.getProviderShipmentId(),
-                    quote.getProviderRateId()
+            ShipmentResponse providerResponse;
+            if (isChowdeck(shipment.getProvider())) {
+                ShipmentRequest request = shipmentRequest(
+                        order,
+                        counterpartyRepository.findByOrder_Id(orderId)
+                                .orElseThrow(() -> new BusinessException("Counterparty details are required")),
+                        parcelRepository.findByOrder_Id(orderId)
+                                .orElseThrow(() -> new BusinessException("Vendor parcel details are required"))
+                );
+                providerResponse = shipmentProvider.arrangePickup(
+                        shipment.getProviderShipmentId(),
+                        quote.getProviderRateId(),
+                        request
+                );
+            } else {
+                providerResponse = shipmentProvider.arrangePickup(
+                        shipment.getProviderShipmentId(),
+                        quote.getProviderRateId()
+                );
+            }
+            ShipmentResponse response = requireShipmentResponse(
+                    providerResponse,
+                    shipment.getProviderShipmentId()
             );
             if (response.status() != ShipmentStatus.CONFIRMED
-                    && response.status() != ShipmentStatus.PENDING) {
+                    && response.status() != ShipmentStatus.PENDING
+                    && response.status() != ShipmentStatus.IN_TRANSIT
+                    && response.status() != ShipmentStatus.DELIVERED) {
                 throw new BusinessException("Shipping provider did not confirm the booking");
             }
             applyShipmentResponse(shipment, response);
@@ -164,13 +179,16 @@ public class OrderShippingService {
             quote.setStatus(ShippingQuoteStatus.USED);
             quoteRepository.save(quote);
             statusService.transition(order, OrderStatus.READY_FOR_DELIVERY, "Shipment pickup arranged");
+            carrierPickupConfirmed = pickupConfirmed(response.status());
         } catch (RuntimeException exception) {
-            shipment.setStatus(ShipmentStatus.FAILED);
             shipment.setFailureReason("Shipment booking attempt failed");
             if (shipment.getBookingAttempt() >= maxBookingAttempts) {
-                shipment.setNextBookingAttemptAt(null);
-                statusService.transition(order, OrderStatus.MANUAL_REVIEW,
-                        "Automated shipment booking retry limit reached");
+                shipment.setNextBookingAttemptAt(Instant.now().plus(retryDelay(shipment.getBookingAttempt())));
+                statusService.transition(
+                        order,
+                        OrderStatus.SHIPPING_FAILED,
+                        "Final carrier state verification required"
+                );
             } else {
                 shipment.setNextBookingAttemptAt(Instant.now().plus(retryDelay(shipment.getBookingAttempt())));
                 statusService.transition(order, OrderStatus.SHIPPING_FAILED, "Shipment booking failed");
@@ -179,51 +197,71 @@ public class OrderShippingService {
             shipmentRepository.save(shipment);
             log.error("Shipment booking failed: orderId={}", orderId);
         }
+        if (carrierPickupConfirmed) {
+            settlementService.recordCarrierPickup(order, shipment);
+        }
         orderRepository.save(order);
     }
 
-    private boolean providerDraftCanBeBooked(Order order, OrderShipment shipment) {
+    private boolean providerDraftCanBeBooked(
+            Order order,
+            OrderShipment shipment,
+            ShippingProvider shipmentProvider
+    ) {
         ShipmentTrackingStatus tracking;
         try {
-            tracking = shippingProvider.trackShipment(shipment.getProviderShipmentId());
+            tracking = requireTrackingStatus(
+                    shipment.getProviderShipmentId(),
+                    shipmentProvider.trackShipment(shipment.getProviderShipmentId())
+            );
         } catch (RuntimeException exception) {
             deferBookingPreflight(shipment, "Unable to verify shipment state before booking");
             log.warn("Unable to verify shipment before booking: orderId={}", order.getId());
             return false;
         }
+        return applyProviderDraftState(order, shipment, tracking);
+    }
+
+    private boolean applyProviderDraftState(
+            Order order,
+            OrderShipment shipment,
+            ShipmentTrackingStatus tracking
+    ) {
         if (tracking == null || tracking.currentStatus() == null) {
             deferBookingPreflight(shipment, "Shipping provider returned no tracking state");
             return false;
         }
-        if (tracking.currentStatus() == ShipmentStatus.DRAFT) {
-            shipment.setStatus(ShipmentStatus.DRAFT);
-            shipment.setProviderUpdatedAt(tracking.lastUpdated());
+        boolean accepted = applyProviderStatus(
+                shipment,
+                tracking.currentStatus(),
+                tracking.lastUpdated()
+        );
+        if (accepted || !hasText(shipment.getTrackingUrl())) {
+            applyTrackingDetails(shipment, tracking, accepted);
+        }
+        ShipmentStatus effectiveStatus = shipment.getStatus();
+        if (effectiveStatus == ShipmentStatus.DRAFT) {
+            if (tracking.currentStatus() != ShipmentStatus.DRAFT) {
+                deferBookingPreflight(shipment, "Shipping provider returned a stale shipment state");
+                return false;
+            }
             shipment.setNextBookingAttemptAt(null);
             shipment.setFailureReason(null);
             shipment.setUpdatedAt(Instant.now());
             shipmentRepository.save(shipment);
             return true;
         }
-        if (tracking.currentStatus() == ShipmentStatus.PENDING
-                || tracking.currentStatus() == ShipmentStatus.CONFIRMED
-                || tracking.currentStatus() == ShipmentStatus.IN_TRANSIT
-                || tracking.currentStatus() == ShipmentStatus.DELIVERED) {
-            shipment.setStatus(tracking.currentStatus());
-            shipment.setProviderUpdatedAt(tracking.lastUpdated());
+        if (effectiveStatus == ShipmentStatus.PENDING
+                || effectiveStatus == ShipmentStatus.CONFIRMED
+                || effectiveStatus == ShipmentStatus.IN_TRANSIT
+                || effectiveStatus == ShipmentStatus.DELIVERED) {
             shipment.setNextBookingAttemptAt(null);
             shipment.setFailureReason(null);
             shipment.setUpdatedAt(Instant.now());
             shipmentRepository.save(shipment);
-            if (order.getStatus() == OrderStatus.SHIPPING_FAILED) {
-                statusService.transition(order, OrderStatus.SHIPMENT_BOOKING,
-                        "Carrier confirmed shipment recovery");
-            }
-            statusService.transition(order, OrderStatus.READY_FOR_DELIVERY, "Shipment recovered and active");
-            orderRepository.save(order);
-        } else if (tracking.currentStatus() == ShipmentStatus.FAILED
-                || tracking.currentStatus() == ShipmentStatus.CANCELLED) {
-            shipment.setStatus(tracking.currentStatus());
-            shipment.setProviderUpdatedAt(tracking.lastUpdated());
+            synchronizeOrderStatus(order, shipment);
+        } else if (effectiveStatus == ShipmentStatus.FAILED
+                || effectiveStatus == ShipmentStatus.CANCELLED) {
             shipment.setFailureReason("Carrier reports a terminal shipment state");
             shipment.setNextBookingAttemptAt(null);
             shipment.setUpdatedAt(Instant.now());
@@ -249,19 +287,45 @@ public class OrderShippingService {
 
     @Transactional
     public ShippingStatusResponse refreshTracking(Long orderId) {
-        Order order = orderRepository.findById(orderId)
-                .orElseThrow(() -> new ResourceNotFoundException("Order not found"));
+        Order order = requireOrderForUpdate(orderId);
         orderService.requireOwner(order);
         OrderShipment shipment = shipmentRepository.findByOrderIdForUpdate(orderId)
                 .orElseThrow(() -> new ResourceNotFoundException("Shipment not found"));
-        ShipmentTrackingStatus tracking = shippingProvider.trackShipment(shipment.getProviderShipmentId());
-        if (canAdvance(shipment.getStatus(), tracking.currentStatus())) {
-            shipment.setStatus(tracking.currentStatus());
-            shipment.setProviderUpdatedAt(tracking.lastUpdated());
+        refreshTracking(order, shipment);
+        return shippingStatus(shipment, selectedOrUsedQuote(orderId));
+    }
+
+    @Transactional
+    public void reconcileChowdeckTracking(Long orderId) {
+        Order order = requireOrderForUpdate(orderId);
+        OrderShipment shipment = shipmentRepository.findByOrderIdForUpdate(orderId).orElse(null);
+        if (shipment == null
+                || !isChowdeck(shipment.getProvider())
+                || !ACTIVE_TRACKING_STATUSES.contains(shipment.getStatus())) {
+            return;
+        }
+        refreshTracking(order, shipment);
+    }
+
+    private void refreshTracking(Order order, OrderShipment shipment) {
+        ShippingProvider shipmentProvider = shippingRoutingService.require(shipment.getProvider());
+        ShipmentTrackingStatus tracking = requireTrackingStatus(
+                shipment.getProviderShipmentId(),
+                shipmentProvider.trackShipment(shipment.getProviderShipmentId())
+        );
+        boolean accepted = applyProviderStatus(shipment, tracking.currentStatus(), tracking.lastUpdated());
+        if (accepted || !hasText(shipment.getTrackingUrl())) {
+            applyTrackingDetails(shipment, tracking, accepted);
         }
         shipment.setUpdatedAt(Instant.now());
         shipmentRepository.save(shipment);
-        return shippingStatus(shipment, selectedOrUsedQuote(orderId));
+        boolean pickupEvidence = hasPickupEvidence(tracking);
+        if (pickupEvidence) {
+            settlementService.recordCarrierPickupEvidence(order, shipment, pickupEvidenceAt(tracking));
+        }
+        if (accepted || pickupEvidence) {
+            synchronizeOrderStatus(order, shipment);
+        }
     }
 
     @Transactional
@@ -297,10 +361,23 @@ public class OrderShippingService {
         }
         OrderShipment shipment = shipmentRepository.findByOrderIdForUpdate(orderId).orElse(null);
         if (shipment != null && shipment.getProviderShipmentId() != null) {
-            applyShipmentResponse(
-                    shipment,
-                    shippingProvider.cancelShipment(shipment.getProviderShipmentId())
-            );
+            ShippingProvider shipmentProvider = shippingRoutingService.require(shipment.getProvider());
+            if (shipment.getStatus() == ShipmentStatus.DRAFT && isChowdeck(shipment.getProvider())) {
+                shipment.setStatus(ShipmentStatus.CANCELLED);
+                shipment.setUpdatedAt(Instant.now());
+                shipmentRepository.save(shipment);
+            } else {
+                ShipmentResponse cancellationResponse = isChowdeck(shipment.getProvider())
+                        ? shipmentProvider.cancelShipment(
+                                shipment.getProviderShipmentId(),
+                                "Order cancelled before payment"
+                        )
+                        : shipmentProvider.cancelShipment(shipment.getProviderShipmentId());
+                applyShipmentResponse(
+                        shipment,
+                        cancellationResponse
+                );
+            }
         }
         statusService.transition(order, OrderStatus.CANCELLED, "Order cancelled before payment");
         orderRepository.save(order);
@@ -313,41 +390,116 @@ public class OrderShippingService {
         if (!event.relevant()) {
             return;
         }
-        String eventKey = event.shipmentId() + ":" + event.status() + ":" + payloadHash(payload.rawBody());
-        if (webhookEventRepository.existsByProviderAndEventKey("TERMINAL_AFRICA", eventKey)) {
+        applyWebhookEvent(event, payloadHash(payload.rawBody()));
+    }
+
+    @Transactional
+    public void applyWebhookEvent(ShipmentStatusUpdatedEvent event, String eventKey) {
+        if (!event.relevant()) {
             return;
         }
-        OrderShipment shipment = shipmentRepository.findByProviderShipmentIdForUpdate(event.shipmentId())
+        if (event.occurredAt() == null) {
+            throw new BusinessException("Terminal Africa webhook timestamp is required");
+        }
+        String dedupeKey = boundedEventKey(eventKey);
+        if (webhookEventRepository.existsByProviderAndEventKey("TERMINAL_AFRICA", dedupeKey)) {
+            return;
+        }
+        OrderShipment located = shipmentRepository.findByProviderShipmentId(event.shipmentId())
                 .orElse(null);
-        if (shipment == null) {
+        if (located == null || isChowdeck(located.getProvider())) {
             return;
         }
-        if (canAdvance(shipment.getStatus(), event.status())) {
-            shipment.setStatus(event.status());
-            shipment.setProviderUpdatedAt(event.occurredAt());
+        Order order = requireOrderForUpdate(located.getOrder().getId());
+        OrderShipment shipment = shipmentRepository.findByOrderIdForUpdate(order.getId()).orElse(null);
+        if (shipment == null || !event.shipmentId().equals(shipment.getProviderShipmentId())) {
+            return;
+        }
+        if (webhookEventRepository.existsByProviderAndEventKey("TERMINAL_AFRICA", dedupeKey)) {
+            return;
+        }
+        boolean pickupEvidence = pickupConfirmed(event.status());
+        if (pickupEvidence) {
+            settlementService.recordCarrierPickupEvidence(order, shipment, event.occurredAt());
+        }
+        boolean accepted = applyProviderStatus(shipment, event.status(), event.occurredAt());
+        if (accepted) {
             shipment.setUpdatedAt(Instant.now());
             shipmentRepository.save(shipment);
-            Order order = orderRepository.findByIdForUpdate(shipment.getOrder().getId())
-                    .orElseThrow(() -> new ResourceNotFoundException("Order not found"));
-            if ((event.status() == ShipmentStatus.CANCELLED || event.status() == ShipmentStatus.FAILED)
-                    && (order.getStatus() == OrderStatus.READY_FOR_DELIVERY
-                    || order.getStatus() == OrderStatus.SHIPMENT_BOOKING)) {
-                statusService.transition(order, OrderStatus.SHIPPING_FAILED, "Carrier shipment failed or cancelled");
-                orderRepository.save(order);
-            } else if ((event.status() == ShipmentStatus.CONFIRMED
-                    || event.status() == ShipmentStatus.IN_TRANSIT
-                    || event.status() == ShipmentStatus.DELIVERED)
-                    && order.getStatus() == OrderStatus.SHIPPING_FAILED) {
-                statusService.transition(order, OrderStatus.SHIPMENT_BOOKING, "Carrier confirmed shipment recovery");
-                statusService.transition(order, OrderStatus.READY_FOR_DELIVERY, "Shipment recovered and active");
-                orderRepository.save(order);
-            }
+        }
+        if (accepted || pickupEvidence) {
+            synchronizeOrderStatus(order, shipment);
         }
         webhookEventRepository.save(ProcessedWebhookEvent.builder()
                 .provider("TERMINAL_AFRICA")
-                .eventKey(eventKey)
+                .eventKey(dedupeKey)
                 .createdAt(Instant.now())
                 .build());
+    }
+
+    private void resetExpiredPaymentSelection(Order order, Instant now) {
+        if (order.getStatus() != OrderStatus.AWAITING_PAYMENT
+                || order.getPaymentStatus() != PaymentStatus.PENDING) {
+            return;
+        }
+        ShippingQuote selected = quoteRepository.findByShipment_Order_IdAndStatus(
+                order.getId(),
+                ShippingQuoteStatus.SELECTED
+        ).orElse(null);
+        if (selected == null || selected.getExpiresAt().isAfter(now)) {
+            return;
+        }
+
+        boolean capturedPayment = paymentReceiptRepository.existsByOrder_IdAndProviderStatus(
+                order.getId(),
+                com.example.shopsecure.provider.payment.PaymentTransactionStatus.SUCCESS
+        ) || paymentAttemptRepository.findFirstByOrder_IdAndStatusOrderByCreatedAtDesc(
+                order.getId(),
+                PaymentAttemptStatus.SUCCESS
+        ).isPresent();
+        boolean checkoutOutcomeUnknown = paymentAttemptRepository
+                .findFirstByOrder_IdAndStatusOrderByCreatedAtDesc(
+                        order.getId(),
+                        PaymentAttemptStatus.INITIALIZED
+                )
+                .isPresent();
+        if (order.getFundedAt() != null
+                || order.getPaymentStatus() == PaymentStatus.CONFIRMED
+                || capturedPayment
+                || checkoutOutcomeUnknown) {
+            statusService.transition(
+                    order,
+                    OrderStatus.MANUAL_REVIEW,
+                    "Expired shipping quote has a captured or unreconciled payment"
+            );
+            orderRepository.save(order);
+            throw new PaymentReviewRequiredException("Expired order quote requires payment review");
+        }
+
+        selected.setStatus(ShippingQuoteStatus.EXPIRED);
+        quoteRepository.save(selected);
+        List.of(PaymentAttemptStatus.FAILED, PaymentAttemptStatus.ABANDONED)
+                .forEach(status -> paymentAttemptRepository.findByOrder_IdAndStatus(
+                        order.getId(),
+                        status
+                ).forEach(attempt -> {
+                    attempt.setStatus(PaymentAttemptStatus.SUPERSEDED);
+                    attempt.setUpdatedAt(now);
+                    paymentAttemptRepository.save(attempt);
+                }));
+        order.setProviderDeliveryFee(null);
+        order.setDeliveryMarkup(null);
+        order.setDeliveryFee(null);
+        order.setServiceFee(null);
+        order.setTotalAmount(null);
+        order.setPaymentReference(null);
+        order.setPaymentStatus(PaymentStatus.NOT_STARTED);
+        statusService.transition(
+                order,
+                OrderStatus.AWAITING_SHIPPING_RATE,
+                "Expired shipping quote reset for fresh rates"
+        );
+        orderRepository.save(order);
     }
 
     private List<ShippingQuoteResponse> createQuotes(Order order) {
@@ -355,8 +507,7 @@ public class OrderShippingService {
             throw new BusinessException("Order is not awaiting a shipping quote");
         }
         OrderCounterparty counterparty = counterpartyRepository.findByOrder_Id(order.getId())
-                .filter(OrderCounterparty::isPhoneVerified)
-                .orElseThrow(() -> new BusinessException("Counterparty must verify their details first"));
+                .orElseThrow(() -> new BusinessException("Counterparty details are required"));
         OrderParcel parcel = parcelRepository.findByOrder_Id(order.getId())
                 .orElseThrow(() -> new BusinessException("Vendor parcel details are required"));
 
@@ -386,32 +537,45 @@ public class OrderShippingService {
         validateAddress(request.deliveryAddress(), "delivery");
 
         OrderShipment shipment = existingShipment;
+        ShippingProvider.ShippingQuoteResult quoteResult;
         if (shipment == null) {
-            ShipmentResponse response = shippingProvider.createQuickShipment(request);
+            ShippingProviderRoutingService.PreparedShipment prepared = shippingRoutingService.prepare(
+                    request,
+                    order.getCurrency()
+            );
+            ShipmentResponse response = requireShipmentResponse(prepared.preparation().shipment());
             Instant now = Instant.now();
             shipment = shipmentRepository.save(OrderShipment.builder()
                     .order(order)
-                    .provider(terminalEnabled ? "TERMINAL_AFRICA" : "STUB")
+                    .provider(prepared.providerCode())
                     .providerShipmentId(response.shipmentId())
                     .status(response.status())
                     .trackingReference(response.trackingReference())
-                    .trackingUrl(response.trackingUrl())
+                    .trackingUrl(TrackingUrl.normalizeHttps(response.trackingUrl()))
                     .providerUpdatedAt(response.updatedAt())
                     .createdAt(now)
                     .updatedAt(now)
                     .build());
+            quoteResult = prepared.preparation().quoteResult();
+        } else {
+            quoteResult = shippingRoutingService.quote(
+                    shipment.getProvider(),
+                    shipment.getProviderShipmentId(),
+                    request,
+                    order.getCurrency()
+            );
         }
 
-        List<ShippingRateOption> rates = shippingProvider.getRates(
-                shipment.getProviderShipmentId(),
-                order.getCurrency()
-        );
-        if (rates.isEmpty()) {
+        List<ShippingRateOption> rates = quoteResult == null ? null : quoteResult.rates();
+        if (rates == null || rates.isEmpty()) {
             throw new BusinessException("No shipping rates are currently available");
         }
+        Instant expiresAt = quoteResult.expiresAt() == null
+                ? Instant.now().plus(quoteTtl)
+                : quoteResult.expiresAt();
         OrderShipment persistedShipment = shipment;
         return rates.stream()
-                .map(rate -> persistQuote(order, persistedShipment, rate))
+                .map(rate -> persistQuote(order, persistedShipment, rate, expiresAt))
                 .sorted((left, right) -> left.deliveryFee().compareTo(right.deliveryFee()))
                 .toList();
     }
@@ -419,7 +583,8 @@ public class OrderShippingService {
     private ShippingQuoteResponse persistQuote(
             Order order,
             OrderShipment shipment,
-            ShippingRateOption rate
+            ShippingRateOption rate,
+            Instant expiresAt
     ) {
         if (!order.getCurrency().equalsIgnoreCase(rate.currency())) {
             throw new BusinessException("Shipping rate currency does not match the order");
@@ -446,7 +611,7 @@ public class OrderShippingService {
         quote.setDeliveryEstimate(rate.deliveryEstimate());
         quote.setStatus(ShippingQuoteStatus.AVAILABLE);
         quote.setSelectedAt(null);
-        quote.setExpiresAt(Instant.now().plus(quoteTtl));
+        quote.setExpiresAt(expiresAt);
         quote = quoteRepository.save(quote);
         return quoteResponse(quote);
     }
@@ -479,7 +644,7 @@ public class OrderShippingService {
             order.setPaymentReference(paymentReference(order.getId()));
         }
         order.setPaymentStatus(PaymentStatus.PENDING);
-        statusService.transition(order, OrderStatus.AWAITING_PAYMENT, "Buyer selected shipping quote");
+        statusService.transition(order, OrderStatus.AWAITING_PAYMENT, "Creator selected shipping quote");
         orderRepository.save(order);
         return new ShippingSelectionResponse(
                 order.getStatus(),
@@ -488,7 +653,8 @@ public class OrderShippingService {
                 pricingResponse(order),
                 order.getFundingMode() == OrderFundingMode.DIRECT_DVA
                         ? paymentInstructions(order)
-                        : null
+                        : null,
+                orderService.buyerPaymentLink(order)
         );
     }
 
@@ -543,11 +709,15 @@ public class OrderShippingService {
                 ),
                 creatorIsVendor ? creatorContact : counterpartyContact,
                 creatorIsVendor ? counterpartyContact : creatorContact,
-                "order-" + order.getId()
+                "order-" + order.getId(),
+                creatorIsVendor ? ShipmentUserAction.SENDING : ShipmentUserAction.RECEIVING
         );
     }
 
     private void validateAddress(ShipmentAddress address, String label) {
+        if (address == null || !"NG".equalsIgnoreCase(address.country())) {
+            throw new BusinessException("Only Nigerian shipping addresses are supported");
+        }
         AddressValidationResult result = shippingProvider.validateAddress(address);
         if (!result.valid()) {
             throw new BusinessException("The " + label + " address could not be validated");
@@ -592,16 +762,22 @@ public class OrderShippingService {
                 quote.getBuyerTotal(),
                 quote.getCurrency(),
                 quote.getPickupEstimate(),
-                quote.getDeliveryEstimate()
+                quote.getDeliveryEstimate(),
+                quote.getExpiresAt()
         );
     }
 
     private ShippingStatusResponse shippingStatus(OrderShipment shipment, ShippingQuote quote) {
+        OrderTrackingService.TrackingLink trackingLink = trackingService.linkForOrder(
+                shipment.getOrder().getId()
+        );
         return new ShippingStatusResponse(
                 shipment.getStatus(),
                 quote == null ? null : quote.getCarrierName(),
                 shipment.getTrackingReference(),
                 shipment.getTrackingUrl(),
+                trackingLink == null ? null : trackingLink.url(),
+                trackingLink == null ? null : trackingLink.availableAt(),
                 quote == null ? null : quote.getDeliveryEstimate(),
                 shipment.getUpdatedAt()
         );
@@ -609,11 +785,182 @@ public class OrderShippingService {
 
     private void applyShipmentResponse(OrderShipment shipment, ShipmentResponse response) {
         shipment.setStatus(response.status());
-        shipment.setTrackingReference(response.trackingReference());
-        shipment.setTrackingUrl(response.trackingUrl());
+        if (hasText(response.trackingReference())) {
+            shipment.setTrackingReference(response.trackingReference());
+        }
+        String trackingUrl = TrackingUrl.normalizeHttps(response.trackingUrl());
+        if (trackingUrl != null) {
+            shipment.setTrackingUrl(trackingUrl);
+        }
         shipment.setProviderUpdatedAt(response.updatedAt());
         shipment.setUpdatedAt(Instant.now());
         shipmentRepository.save(shipment);
+    }
+
+    private ShipmentResponse requireShipmentResponse(ShipmentResponse response) {
+        if (response == null || !hasText(response.shipmentId()) || response.status() == null) {
+            throw new BusinessException("Shipping provider returned an invalid shipment response");
+        }
+        return response;
+    }
+
+    private ShipmentResponse requireShipmentResponse(
+            ShipmentResponse response,
+            String expectedShipmentId
+    ) {
+        ShipmentResponse required = requireShipmentResponse(response);
+        if (!required.shipmentId().equals(expectedShipmentId)) {
+            throw new BusinessException("Shipping provider returned a mismatched shipment response");
+        }
+        return required;
+    }
+
+    private ShipmentTrackingStatus requireTrackingStatus(
+            String expectedShipmentId,
+            ShipmentTrackingStatus tracking
+    ) {
+        if (tracking == null
+                || tracking.currentStatus() == null
+                || !expectedShipmentId.equals(tracking.shipmentId())) {
+            throw new BusinessException("Shipping provider returned a mismatched tracking response");
+        }
+        return tracking;
+    }
+
+    private boolean applyProviderStatus(
+            OrderShipment shipment,
+            ShipmentStatus target,
+            Instant providerUpdatedAt
+    ) {
+        if (providerUpdatedAt != null
+                && shipment.getProviderUpdatedAt() != null
+                && !providerUpdatedAt.isAfter(shipment.getProviderUpdatedAt())) {
+            return false;
+        }
+        if (!canAdvance(shipment.getStatus(), target)) {
+            return false;
+        }
+        shipment.setStatus(target);
+        if (providerUpdatedAt != null) {
+            shipment.setProviderUpdatedAt(providerUpdatedAt);
+        }
+        return true;
+    }
+
+    private void applyTrackingDetails(
+            OrderShipment shipment,
+            ShipmentTrackingStatus tracking,
+            boolean replaceExisting
+    ) {
+        if (hasText(tracking.trackingReference())
+                && (replaceExisting || !hasText(shipment.getTrackingReference()))) {
+            shipment.setTrackingReference(tracking.trackingReference());
+        }
+        String trackingUrl = TrackingUrl.normalizeHttps(tracking.trackingUrl());
+        if (trackingUrl != null && (replaceExisting || !hasText(shipment.getTrackingUrl()))) {
+            shipment.setTrackingUrl(trackingUrl);
+        }
+    }
+
+    private void synchronizeOrderStatus(Order order, OrderShipment shipment) {
+        ShipmentStatus shipmentStatus = shipment.getStatus();
+        boolean changed = false;
+        if ((shipmentStatus == ShipmentStatus.CANCELLED || shipmentStatus == ShipmentStatus.FAILED)
+                && (order.getStatus() == OrderStatus.READY_FOR_DELIVERY
+                || order.getStatus() == OrderStatus.SHIPMENT_BOOKING)) {
+            changed = statusService.transition(
+                    order,
+                    OrderStatus.SHIPPING_FAILED,
+                    "Carrier shipment failed or cancelled"
+            );
+        } else if ((shipmentStatus == ShipmentStatus.CANCELLED || shipmentStatus == ShipmentStatus.FAILED)
+                && order.getEscrowReleasePolicy() == EscrowReleasePolicy.CARRIER_PICKUP
+                && order.getCarrierPickupConfirmedAt() != null
+                && (order.getStatus() == OrderStatus.PAYOUT_PENDING
+                || order.getStatus() == OrderStatus.PAYOUT_FAILED
+                || order.getStatus() == OrderStatus.IN_TRANSIT)) {
+            changed = statusService.transition(
+                    order,
+                    OrderStatus.MANUAL_REVIEW,
+                    "Carrier shipment failed after escrow release was triggered"
+            );
+        } else if (shipmentStatus == ShipmentStatus.PENDING
+                || shipmentStatus == ShipmentStatus.CONFIRMED
+                || shipmentStatus == ShipmentStatus.IN_TRANSIT
+                || shipmentStatus == ShipmentStatus.DELIVERED) {
+            if (order.getStatus() == OrderStatus.SHIPPING_FAILED) {
+                changed = statusService.transition(
+                        order,
+                        OrderStatus.SHIPMENT_BOOKING,
+                        "Carrier confirmed shipment recovery"
+                );
+            }
+            if (order.getStatus() == OrderStatus.SHIPMENT_BOOKING) {
+                changed |= statusService.transition(
+                        order,
+                        OrderStatus.READY_FOR_DELIVERY,
+                        "Shipment recovered and active"
+                );
+            }
+        }
+        if (shipmentStatus == ShipmentStatus.DELIVERED
+                && order.getStatus() == OrderStatus.IN_TRANSIT
+                && order.getSettlementStatus() == SettlementStatus.COMPLETED) {
+            order.setCompletedAt(Instant.now());
+            changed |= statusService.transition(
+                    order,
+                    OrderStatus.COMPLETED,
+                    "Carrier confirmed delivery"
+            );
+        }
+        if (changed) {
+            orderRepository.save(order);
+        }
+        if (pickupConfirmed(shipmentStatus)) {
+            settlementService.recordCarrierPickup(order, shipment);
+        }
+    }
+
+    private boolean pickupConfirmed(ShipmentStatus status) {
+        return status == ShipmentStatus.IN_TRANSIT || status == ShipmentStatus.DELIVERED;
+    }
+
+    private boolean hasPickupEvidence(ShipmentTrackingStatus tracking) {
+        return pickupConfirmed(tracking.currentStatus()) || tracking.history().stream()
+                .map(ShipmentTrackingCheckpoint::status)
+                .anyMatch(this::pickupConfirmed);
+    }
+
+    private Instant pickupEvidenceAt(ShipmentTrackingStatus tracking) {
+        return tracking.history().stream()
+                .filter(checkpoint -> pickupConfirmed(checkpoint.status()))
+                .map(ShipmentTrackingCheckpoint::timestamp)
+                .filter(java.util.Objects::nonNull)
+                .min(Instant::compareTo)
+                .orElse(pickupConfirmed(tracking.currentStatus()) ? tracking.lastUpdated() : null);
+    }
+
+    private String boundedEventKey(String eventKey) {
+        if (!hasText(eventKey)) {
+            throw new IllegalArgumentException("Webhook event key is required");
+        }
+        if (eventKey.length() <= 160) {
+            return eventKey;
+        }
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(eventKey.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception exception) {
+            throw new IllegalStateException("Unable to fingerprint webhook event key", exception);
+        }
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    private boolean isChowdeck(String provider) {
+        return provider != null && ShippingProviderCode.CHOWDECK.equalsIgnoreCase(provider);
     }
 
     private ShippingQuote selectedQuote(Long orderId) {
@@ -684,5 +1031,11 @@ public class OrderShippingService {
             case DELIVERED -> 5;
             case CANCELLED, FAILED -> 6;
         };
+    }
+
+    private static final class PaymentReviewRequiredException extends BusinessException {
+        private PaymentReviewRequiredException(String message) {
+            super(message);
+        }
     }
 }

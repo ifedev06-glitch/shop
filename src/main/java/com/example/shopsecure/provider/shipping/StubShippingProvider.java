@@ -25,6 +25,18 @@ public class StubShippingProvider implements ShippingProvider {
 
     private static final String STANDARD_RATE_ID = "stub-standard";
     private static final String EXPRESS_RATE_ID = "stub-express";
+    private static final List<ShippingState> STATES = List.of(
+            new ShippingState("Federal Capital Territory", "FC", "NG"),
+            new ShippingState("Lagos", "LA", "NG"),
+            new ShippingState("Rivers", "RI", "NG")
+    );
+    private static final List<ShippingCity> CITIES = List.of(
+            new ShippingCity("Abuja", "FC", "NG"),
+            new ShippingCity("Epe", "LA", "NG"),
+            new ShippingCity("Ikeja", "LA", "NG"),
+            new ShippingCity("Lagos", "LA", "NG"),
+            new ShippingCity("Port Harcourt", "RI", "NG")
+    );
 
     private final ObjectMapper objectMapper;
     private final String webhookSecret;
@@ -49,12 +61,25 @@ public class StubShippingProvider implements ShippingProvider {
     }
 
     @Override
+    public List<ShippingState> getStates(String countryCode) {
+        requireCountry(countryCode);
+        return STATES;
+    }
+
+    @Override
+    public List<ShippingCity> getCities(String countryCode) {
+        requireCountry(countryCode);
+        return CITIES;
+    }
+
+    @Override
     public ShipmentResponse createQuickShipment(ShipmentRequest request) {
         String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 12).toUpperCase(Locale.ROOT);
         String shipmentId = "SHP-MOCK-" + suffix;
         String trackingReference = "TRK-MOCK-" + suffix;
         Instant now = Instant.now();
         ShipmentTrackingStatus trackingStatus = new ShipmentTrackingStatus(
+                shipmentId,
                 ShipmentStatus.DRAFT,
                 now,
                 List.of(new ShipmentTrackingCheckpoint(
@@ -62,7 +87,9 @@ public class StubShippingProvider implements ShippingProvider {
                         now,
                         "Draft shipment created with mock carrier",
                         request.pickupAddress() == null ? null : request.pickupAddress().city()
-                ))
+                )),
+                trackingReference,
+                "https://tracking.example.test/" + trackingReference
         );
         ShipmentResponse response = new ShipmentResponse(
                 shipmentId,
@@ -191,7 +218,14 @@ public class StubShippingProvider implements ShippingProvider {
         ShipmentTrackingStatus current = requireShipment(shipmentId);
         List<ShipmentTrackingCheckpoint> history = new ArrayList<>(current.history());
         history.add(new ShipmentTrackingCheckpoint(status, occurredAt, description, null));
-        shipments.put(shipmentId, new ShipmentTrackingStatus(status, occurredAt, history));
+        shipments.put(shipmentId, new ShipmentTrackingStatus(
+                shipmentId,
+                status,
+                occurredAt,
+                history,
+                current.trackingReference(),
+                current.trackingUrl()
+        ));
 
         ShipmentResponse currentResponse = shipmentResponses.get(shipmentId);
         ShipmentResponse updated = new ShipmentResponse(
@@ -235,6 +269,12 @@ public class StubShippingProvider implements ShippingProvider {
             );
         } catch (Exception exception) {
             return false;
+        }
+    }
+
+    private void requireCountry(String countryCode) {
+        if (!hasText(countryCode) || !"NG".equalsIgnoreCase(countryCode.trim())) {
+            throw new BusinessException("Only Nigerian shipping locations are supported");
         }
     }
 

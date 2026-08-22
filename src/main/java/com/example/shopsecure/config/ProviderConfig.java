@@ -1,6 +1,9 @@
 package com.example.shopsecure.config;
 
+import com.example.shopsecure.provider.shipping.ChowdeckShippingProvider;
 import com.example.shopsecure.provider.shipping.ShippingProvider;
+import com.example.shopsecure.provider.shipping.ShippingProviderCode;
+import com.example.shopsecure.provider.shipping.ShippingProviderRegistry;
 import com.example.shopsecure.provider.shipping.StubShippingProvider;
 import com.example.shopsecure.provider.shipping.TerminalAfricaShippingProvider;
 import com.example.shopsecure.provider.notification.SmsProvider;
@@ -36,6 +39,38 @@ public class ProviderConfig {
             );
         }
         return new StubShippingProvider(objectMapper, stubWebhookSecret);
+    }
+
+    @Bean
+    public ShippingProviderRegistry shippingProviderRegistry(
+            ShippingProvider defaultProvider,
+            RestTemplate restTemplate,
+            ObjectMapper objectMapper,
+            @Value("${shipping.terminal-africa.enabled:false}") boolean terminalEnabled,
+            @Value("${shipping.stub.webhook-secret:local-shipping-webhook-secret}") String stubWebhookSecret,
+            @Value("${shipping.chowdeck.secret-key:}") String chowdeckSecretKey,
+            @Value("${shipping.chowdeck.base-url:https://api.chowdeck.com}") String chowdeckBaseUrl,
+            @Value("${shipping.chowdeck.quote-ttl:PT5M}") java.time.Duration chowdeckQuoteTtl,
+            @Value("${shipping.chowdeck.hard-disabled:true}") boolean chowdeckHardDisabled
+    ) {
+        StubShippingProvider stubProvider = new StubShippingProvider(objectMapper, stubWebhookSecret);
+        ChowdeckShippingProvider chowdeckProvider = new ChowdeckShippingProvider(
+                restTemplate,
+                objectMapper,
+                chowdeckSecretKey,
+                chowdeckBaseUrl,
+                chowdeckQuoteTtl,
+                chowdeckHardDisabled
+        );
+        return new ShippingProviderRegistry(
+                defaultProvider,
+                terminalEnabled
+                        ? ShippingProviderCode.TERMINAL_AFRICA
+                        : ShippingProviderCode.STUB,
+                chowdeckProvider,
+                terminalEnabled ? defaultProvider : null,
+                stubProvider
+        );
     }
 
     @Bean

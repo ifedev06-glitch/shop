@@ -23,6 +23,7 @@ import com.example.shopsecure.repository.UserRepository;
 import com.example.shopsecure.repository.VirtualAccountRepository;
 import com.example.shopsecure.repository.WalletRepository;
 import com.example.shopsecure.security.JwtService;
+import com.example.shopsecure.util.NigerianPhoneNumber;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -73,7 +74,7 @@ public class AuthService {
                         .firstname(request.getFirstname().trim())
                         .lastname(request.getLastname().trim())
                         .email(email)
-                        .phoneNumber(request.getPhoneNumber().trim())
+                        .phoneNumber(NigerianPhoneNumber.normalize(request.getPhoneNumber()))
                         .password(passwordEncoder.encode(request.getPassword()))
                         .role(Role.USER)
                         .createdAt(LocalDateTime.now())

@@ -8,8 +8,6 @@ import com.example.shopsecure.provider.payment.Bank;
 import com.example.shopsecure.provider.payment.BankAccountLookupRequest;
 import com.example.shopsecure.provider.payment.PayoutProvider;
 import com.example.shopsecure.provider.payment.ResolvedBankAccount;
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -24,11 +22,6 @@ public class BankAccountService {
     private final PayoutProvider payoutProvider;
     private volatile List<Bank> cachedBanks = List.of();
     private volatile Instant banksExpireAt = Instant.EPOCH;
-    private final Cache<BankAccountLookupRequest, ResolvedBankAccount> resolvedAccounts =
-            Caffeine.newBuilder()
-                    .expireAfterWrite(Duration.ofMinutes(10))
-                    .maximumSize(10_000)
-                    .build();
 
     public List<BankResponse> listBanks() {
         return banks().stream()
@@ -52,7 +45,7 @@ public class BankAccountService {
                 .findFirst()
                 .orElseThrow(() -> new BusinessException("Selected bank is not supported"));
         BankAccountLookupRequest lookup = new BankAccountLookupRequest(accountNumber, bankCode);
-        ResolvedBankAccount resolved = resolvedAccounts.get(lookup, payoutProvider::resolveBankAccount);
+        ResolvedBankAccount resolved = payoutProvider.resolveBankAccount(lookup);
         return new ResolvedBankAccount(
                 resolved.accountName(),
                 resolved.accountNumber(),

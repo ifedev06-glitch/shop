@@ -3,9 +3,15 @@ package com.example.shopsecure.integration;
 import com.example.shopsecure.ShopsecureApplication;
 import com.example.shopsecure.entity.CreatorRole;
 import com.example.shopsecure.entity.Order;
+import com.example.shopsecure.entity.OrderCounterparty;
 import com.example.shopsecure.entity.PaymentAttemptStatus;
+import com.example.shopsecure.entity.PaymentStatus;
 import com.example.shopsecure.entity.OrderStatus;
+import com.example.shopsecure.entity.OrderTrackingNotificationStatus;
+import com.example.shopsecure.entity.OrderTrackingNotificationType;
 import com.example.shopsecure.entity.Role;
+import com.example.shopsecure.entity.SettlementStatus;
+import com.example.shopsecure.entity.SettlementTrigger;
 import com.example.shopsecure.entity.ShippingQuote;
 import com.example.shopsecure.entity.User;
 import com.example.shopsecure.entity.VirtualAccount;
@@ -19,11 +25,14 @@ import com.example.shopsecure.provider.payment.PaymentStatusUpdatedEvent;
 import com.example.shopsecure.provider.payment.PaymentTransactionStatus;
 import com.example.shopsecure.provider.payment.PaymentVerificationResult;
 import com.example.shopsecure.provider.payment.PayoutProvider;
+import com.example.shopsecure.provider.payment.PayoutRequest;
 import com.example.shopsecure.provider.payment.PayoutResponse;
 import com.example.shopsecure.provider.payment.PayoutStatus;
 import com.example.shopsecure.provider.payment.ResolvedBankAccount;
 import com.example.shopsecure.provider.payment.VirtualAccountRequest;
 import com.example.shopsecure.provider.payment.VirtualAccountResponse;
+import com.example.shopsecure.provider.shipping.ShipmentStatus;
+import com.example.shopsecure.provider.shipping.ShipmentStatusUpdatedEvent;
 import com.example.shopsecure.repository.GuestOrderAccessTokenRepository;
 import com.example.shopsecure.repository.OrderCounterpartyRepository;
 import com.example.shopsecure.repository.OrderParcelRepository;
@@ -32,6 +41,8 @@ import com.example.shopsecure.repository.OrderRepository;
 import com.example.shopsecure.repository.OrderSettlementRepository;
 import com.example.shopsecure.repository.OrderShipmentRepository;
 import com.example.shopsecure.repository.OrderStatusHistoryRepository;
+import com.example.shopsecure.repository.OrderTrackingAccessTokenRepository;
+import com.example.shopsecure.repository.OrderTrackingNotificationRepository;
 import com.example.shopsecure.repository.OtpChallengeRepository;
 import com.example.shopsecure.repository.PaymentReceiptRepository;
 import com.example.shopsecure.repository.ProcessedWebhookEventRepository;
@@ -42,6 +53,7 @@ import com.example.shopsecure.repository.WalletRepository;
 import com.example.shopsecure.repository.WalletTransactionRepository;
 import com.example.shopsecure.service.EmailService;
 import com.example.shopsecure.service.OrderPaymentService;
+import com.example.shopsecure.service.OrderShippingService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -58,6 +70,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -87,6 +100,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(classes = {
@@ -148,6 +162,8 @@ class OrderFlowIntegrationTest {
     @Autowired
     private OrderPaymentService paymentService;
     @Autowired
+    private OrderShippingService shippingService;
+    @Autowired
     private PasswordEncoder passwordEncoder;
     @Autowired
     private UserRepository userRepository;
@@ -181,6 +197,10 @@ class OrderFlowIntegrationTest {
     private OtpChallengeRepository otpChallengeRepository;
     @Autowired
     private WalletTransactionRepository walletTransactionRepository;
+    @Autowired
+    private OrderTrackingAccessTokenRepository trackingAccessRepository;
+    @Autowired
+    private OrderTrackingNotificationRepository trackingNotificationRepository;
 
     private final AtomicReference<String> deliveredOtp = new AtomicReference<>();
     private final AtomicReference<String> deliveredEmailOtp = new AtomicReference<>();
@@ -259,27 +279,13 @@ class OrderFlowIntegrationTest {
         long orderId = created.path("id").asLong();
         String shareToken = created.path("shareToken").asText();
 
-        JsonNode initialPublicOrder = getPublicOrder(shareToken);
-        assertThat(initialPublicOrder.path("status").asText()).isEqualTo("AWAITING_COUNTERPARTY");
-        assertThat(initialPublicOrder.path("creatorRole").asText()).isEqualTo("BUYER");
-        assertThat(initialPublicOrder.path("counterpartyRole").asText()).isEqualTo("VENDOR");
-
-        VerifiedGuest vendor = submitAndVerifyGuest(
-                shareToken,
-                vendorCounterpartyJson(true),
-                CreatorRole.VENDOR
-        );
+        mockMvc.perform(get("/orders/token/{shareToken}", shareToken))
+                .andExpect(status().isNotFound());
         verify(payoutProvider).createPayoutRecipient(argThat(request ->
                 request.accountName().equals("Bola Vendor")
                         && request.accountNumber().equals("0123456789")
                         && request.bankCode().equals(TEST_BANK_CODE)
         ));
-
-        JsonNode guestStatusBeforeSelection = getGuestStatus(shareToken, vendor.accessToken());
-        assertThat(guestStatusBeforeSelection.path("status").asText()).isEqualTo("AWAITING_SHIPPING_RATE");
-        assertThat(guestStatusBeforeSelection.hasNonNull("paymentInstructions")).isFalse();
-        assertThat(guestStatusBeforeSelection.toString()).doesNotContain("virtualAccount");
-
         JsonNode quotes = responseJson(mockMvc.perform(post("/orders/{orderId}/shipping/quotes", orderId)
                         .with(user(creator.getEmail()).roles("USER")))
                 .andExpect(status().isOk()));
@@ -288,6 +294,8 @@ class OrderFlowIntegrationTest {
         assertMoney(standardQuote, "/deliveryFee", "5750.00");
         assertMoney(standardQuote, "/serviceFee", "500.00");
         assertMoney(standardQuote, "/totalAmount", "131250.00");
+        assertThat(standardQuote.has("providerAmount")).isFalse();
+        assertThat(standardQuote.has("deliveryMarkup")).isFalse();
 
         long quoteId = standardQuote.path("quoteId").asLong();
         ShippingQuote persistedQuote = quoteRepository.findById(quoteId).orElseThrow();
@@ -302,6 +310,8 @@ class OrderFlowIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("AWAITING_PAYMENT")));
         assertPricing(selection.path("pricing"), "5750.00", "131250.00");
+        assertThat(selection.path("pricing").has("providerDeliveryFee")).isFalse();
+        assertThat(selection.path("pricing").has("deliveryMarkup")).isFalse();
         assertThat(selection.path("fundingMode").asText()).isEqualTo("WALLET");
         assertThat(selection.hasNonNull("paymentInstructions")).isFalse();
 
@@ -310,8 +320,9 @@ class OrderFlowIntegrationTest {
                 .andExpect(status().isOk()));
         assertThat(creatorDetails.path("fundingMode").asText()).isEqualTo("WALLET");
         assertThat(creatorDetails.hasNonNull("paymentInstructions")).isFalse();
+        assertThat(creatorDetails.hasNonNull("buyerPaymentLink")).isFalse();
         mockMvc.perform(post("/orders/token/{shareToken}/payments/checkout", shareToken)
-                        .header("X-Order-Access-Token", vendor.accessToken()))
+                        .header("X-Order-Access-Token", "not-issued"))
                 .andExpect(status().isForbidden());
 
         String idempotencyKey = "buyer-wallet-payment";
@@ -388,15 +399,101 @@ class OrderFlowIntegrationTest {
         assertThat(orderRepository.findById(orderId).orElseThrow().getStatus())
                 .isEqualTo(OrderStatus.READY_FOR_DELIVERY);
 
-        JsonNode finalPublicOrder = getPublicOrder(shareToken);
-        assertThat(finalPublicOrder.path("status").asText()).isEqualTo("READY_FOR_DELIVERY");
-        JsonNode vendorStatus = getGuestStatus(shareToken, vendor.accessToken());
-        assertThat(vendorStatus.path("status").asText()).isEqualTo("READY_FOR_DELIVERY");
-        assertThat(vendorStatus.hasNonNull("paymentInstructions")).isFalse();
-        assertThat(vendorStatus.toString()).doesNotContain("virtualAccount");
+        JsonNode trackedOrder = responseJson(mockMvc.perform(get("/orders/{orderId}", orderId)
+                        .with(user(creator.getEmail()).roles("USER")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.shipping.shopSecureTrackingUrl").isNotEmpty())
+                .andExpect(jsonPath("$.shipping.trackingAvailableAt").isNotEmpty()));
+        String trackingUrl = trackedOrder.path("shipping").path("shopSecureTrackingUrl").asText();
+        assertThat(trackingUrl).startsWith("http://localhost:3000/orders/tracking/");
+        String trackingToken = trackingUrl.substring(trackingUrl.lastIndexOf('/') + 1);
+        mockMvc.perform(get("/orders/tracking/{trackingToken}", trackingToken))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(header().string("Referrer-Policy", "no-referrer"))
+                .andExpect(header().string("X-Robots-Tag", "noindex, nofollow, noarchive"))
+                .andExpect(jsonPath("$.orderId").value(orderId))
+                .andExpect(jsonPath("$.itemDescription").value("MacBook Air M3"))
+                .andExpect(jsonPath("$.itemAmount").value(125000.00))
+                .andExpect(jsonPath("$.orderStatus").value("READY_FOR_DELIVERY"))
+                .andExpect(jsonPath("$.trackingStatus").value("AWAITING_PICKUP"))
+                .andExpect(jsonPath("$.paymentStatus").value("CONFIRMED"))
+                .andExpect(jsonPath("$.buyer.firstName").value("Ada"))
+                .andExpect(jsonPath("$.buyer.email").value(CREATOR_EMAIL))
+                .andExpect(jsonPath("$.buyer.phoneNumber").value("+" + creator.getPhoneNumber()))
+                .andExpect(jsonPath("$.buyer.address.line1").value("20 Admiralty Way"))
+                .andExpect(jsonPath("$.vendor.firstName").value("Bola"))
+                .andExpect(jsonPath("$.vendor.email").value("bola.vendor@example.com"))
+                .andExpect(jsonPath("$.vendor.phoneNumber").value("+" + GUEST_PHONE))
+                .andExpect(jsonPath("$.vendor.address.line1").value("12 Marina Road"))
+                .andExpect(jsonPath("$.vendorPayoutAccount.bankAccountLast4").value("6789"))
+                .andExpect(jsonPath("$.vendorPayoutAccount.bankName").value(TEST_BANK_NAME))
+                .andExpect(jsonPath("$.vendorPayoutAccount.bankAccountName").value("Bola Vendor"))
+                .andExpect(jsonPath("$.pricing.itemAmount").value(125000.00))
+                .andExpect(jsonPath("$.pricing.totalAmount").value(131250.00))
+                .andExpect(jsonPath("$.parcel.weightKg").value(2.000))
+                .andExpect(jsonPath("$.shipment.status").value("CONFIRMED"))
+                .andExpect(jsonPath("$.shipment.selectedQuote.carrierName").value("Mock Logistics"))
+                .andExpect(jsonPath("$.shipment.trackingReference").isNotEmpty())
+                .andExpect(jsonPath("$.escrow.releasePolicy").value("CARRIER_PICKUP"))
+                .andExpect(jsonPath("$.escrow.status").value("NOT_STARTED"))
+                .andExpect(jsonPath("$.escrow.amountPending").value(125000.00))
+                .andExpect(jsonPath("$.escrow.amountReleased").value(0.00))
+                .andExpect(jsonPath("$.trackingAvailableAt").isNotEmpty())
+                .andExpect(jsonPath("$.trackingExpiresAt").isNotEmpty());
+        var bookedShipment = shipmentRepository.findByOrder_Id(orderId).orElseThrow();
+        shippingService.applyWebhookEvent(
+                new ShipmentStatusUpdatedEvent(
+                        bookedShipment.getProviderShipmentId(),
+                        ShipmentStatus.IN_TRANSIT,
+                        bookedShipment.getProviderUpdatedAt().plusSeconds(1),
+                        true
+                ),
+                "tracking-link-in-transit"
+        );
+        mockMvc.perform(get("/orders/tracking/{trackingToken}", trackingToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.trackingStatus").value("IN_TRANSIT"))
+                .andExpect(jsonPath("$.orderStatus").value("PAYOUT_PENDING"))
+                .andExpect(jsonPath("$.carrierPickupConfirmedAt").isNotEmpty())
+                .andExpect(jsonPath("$.escrow.status").value("PENDING"))
+                .andExpect(jsonPath("$.escrow.settlementType").value("EXTERNAL_PAYOUT"))
+                .andExpect(jsonPath("$.escrow.trigger").value("CARRIER_PICKUP"))
+                .andExpect(jsonPath("$.escrow.amountPending").value(125000.00))
+                .andExpect(jsonPath("$.escrow.amountReleased").value(0.00))
+                .andExpect(jsonPath("$.escrow.payoutReference").isNotEmpty());
+        JsonNode inTransitOrder = responseJson(mockMvc.perform(get("/orders/{orderId}", orderId)
+                        .with(user(creator.getEmail()).roles("USER")))
+                .andExpect(status().isOk()));
+        assertThat(inTransitOrder.path("shipping").path("shopSecureTrackingUrl").asText())
+                .isEqualTo(trackingUrl);
+        mockMvc.perform(get("/orders/tracking/{trackingToken}", "not-a-valid-token"))
+                .andExpect(status().isNotFound())
+                .andExpect(header().string("Cache-Control", "no-store"))
+                .andExpect(header().string("Referrer-Policy", "no-referrer"));
+        assertThat(trackingAccessRepository.count()).isOne();
+        var persistedTrackingAccess = trackingAccessRepository.findByOrder_Id(orderId).orElseThrow();
+        assertThat(persistedTrackingAccess.getTokenHash()).doesNotContain(trackingToken);
+        assertThat(persistedTrackingAccess.getTokenCiphertext()).doesNotContain(trackingToken);
+        assertThat(trackingNotificationRepository.findAll())
+                .hasSize(4)
+                .allSatisfy(notification ->
+                        assertThat(notification.getStatus()).isEqualTo(OrderTrackingNotificationStatus.SENT));
+        assertThat(trackingNotificationRepository.findAll())
+                .extracting(notification -> notification.getNotificationType())
+                .containsOnly(
+                        OrderTrackingNotificationType.TRACKING_READY,
+                        OrderTrackingNotificationType.CARRIER_PICKUP_CONFIRMED
+                );
+
+        mockMvc.perform(get("/orders/token/{shareToken}", shareToken))
+                .andExpect(status().isNotFound());
 
         Order selectedOrder = orderRepository.findById(orderId).orElseThrow();
-        assertThat(selectedOrder.getStatus()).isEqualTo(OrderStatus.READY_FOR_DELIVERY);
+        assertThat(selectedOrder.getStatus()).isEqualTo(OrderStatus.PAYOUT_PENDING);
+        assertThat(selectedOrder.getSettlementStatus()).isEqualTo(SettlementStatus.PENDING);
+        assertThat(selectedOrder.getCarrierPickupConfirmedAt()).isNotNull();
+        assertThat(selectedOrder.getDeliveryConfirmedAt()).isNull();
         assertThat(selectedOrder.getProviderDeliveryFee()).isEqualByComparingTo("4750.00");
         assertThat(selectedOrder.getDeliveryMarkup()).isEqualByComparingTo("1000.00");
         assertThat(selectedOrder.getDeliveryFee()).isEqualByComparingTo("5750.00");
@@ -410,7 +507,7 @@ class OrderFlowIntegrationTest {
                         && html.contains("delivery partner will contact you"))
         );
         verify(smsProvider, times(1)).sendMessage(
-                eq(GUEST_PHONE),
+                eq("+" + GUEST_PHONE),
                 argThat(message -> message.contains("Buyer payment is confirmed")
                         && message.contains("delivery partner will contact you"))
         );
@@ -421,12 +518,59 @@ class OrderFlowIntegrationTest {
                         && html.contains("vendor has been notified")
                         && html.contains("NGN 131,250.00"))
         );
+        verify(emailService, times(1)).sendEmail(
+                eq(CREATOR_EMAIL),
+                eq("Track your ShopSecure order"),
+                argThat(html -> html.contains(trackingUrl) && html.contains("Buyer")),
+                argThat(key -> key.startsWith("order-tracking-ready/"))
+        );
+        verify(emailService, times(1)).sendEmail(
+                eq("bola.vendor@example.com"),
+                eq("Track your ShopSecure order"),
+                argThat(html -> html.contains(trackingUrl) && html.contains("Vendor")),
+                argThat(key -> key.startsWith("order-tracking-ready/"))
+        );
+        verify(emailService, times(1)).sendEmail(
+                eq(CREATOR_EMAIL),
+                eq("Carrier pickup confirmed"),
+                argThat(html -> html.contains("carrier confirmed that the package")
+                        && html.contains("queued the item-fund payout")
+                        && html.contains(trackingUrl)),
+                argThat(key -> key.startsWith("order-carrier-pickup/"))
+        );
+        verify(emailService, times(1)).sendEmail(
+                eq("bola.vendor@example.com"),
+                eq("Carrier pickup confirmed"),
+                argThat(html -> html.contains("carrier confirmed that the package")
+                        && html.contains("queued the item-fund payout")
+                        && html.contains(trackingUrl)),
+                argThat(key -> key.startsWith("order-carrier-pickup/"))
+        );
         verify(smsProvider, times(1)).sendMessage(
-                eq(creator.getPhoneNumber()),
+                eq("+" + creator.getPhoneNumber()),
                 argThat(message -> message.contains("Your order has been created")
                         && message.contains("vendor has been notified"))
         );
-        verify(payoutProvider, never()).initiatePayout(any());
+        var settlement = settlementRepository.findByOrder_Id(orderId).orElseThrow();
+        assertThat(settlement.getTrigger()).isEqualTo(SettlementTrigger.CARRIER_PICKUP);
+        assertThat(settlement.getAmount()).isEqualByComparingTo("125000.00");
+        verify(payoutProvider, times(1)).initiatePayout(argThat((PayoutRequest request) ->
+                request.recipientId().equals("RCP_TEST_VENDOR")
+                        && request.amount().compareTo(new BigDecimal("125000.00")) == 0
+        ));
+
+        persistedTrackingAccess.setExpiresAt(Instant.now().minusSeconds(1));
+        persistedTrackingAccess = trackingAccessRepository.saveAndFlush(persistedTrackingAccess);
+        mockMvc.perform(get("/orders/tracking/{trackingToken}", trackingToken))
+                .andExpect(status().isNotFound())
+                .andExpect(header().string("Cache-Control", "no-store"));
+
+        persistedTrackingAccess.setExpiresAt(Instant.now().plusSeconds(60));
+        persistedTrackingAccess.setRevokedAt(Instant.now());
+        trackingAccessRepository.saveAndFlush(persistedTrackingAccess);
+        mockMvc.perform(get("/orders/tracking/{trackingToken}", trackingToken))
+                .andExpect(status().isNotFound())
+                .andExpect(header().string("Cache-Control", "no-store"));
     }
 
     @Test
@@ -436,30 +580,16 @@ class OrderFlowIntegrationTest {
         String shareToken = created.path("shareToken").asText();
         assertThat(created.path("fundingMode").asText()).isEqualTo("PAYSTACK_CHECKOUT");
 
-        getPublicOrder(shareToken);
+        mockMvc.perform(get("/orders/token/{shareToken}", shareToken))
+                .andExpect(status().isNotFound());
         String creatorDetailsBeforeVerification = mockMvc.perform(get("/orders/{orderId}", orderId)
                         .with(user(creator.getEmail()).roles("USER")))
                 .andExpect(status().isOk())
                 .andReturn().getResponse().getContentAsString();
         assertThat(creatorDetailsBeforeVerification).doesNotContain("virtualAccount");
 
-        mockMvc.perform(post("/orders/token/{shareToken}/counterparty-info", shareToken)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(buyerCounterpartyJson(true)))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("A buyer must not submit payout bank or parcel details"));
-        assertThat(counterpartyRepository.count()).isZero();
-        assertThat(deliveredOtp.get()).isNull();
-
-        VerifiedGuest buyer = submitAndVerifyGuest(
-                shareToken,
-                buyerCounterpartyJson(false),
-                CreatorRole.BUYER
-        );
-        getPublicOrder(shareToken);
-
-        JsonNode quotes = responseJson(mockMvc.perform(post("/orders/token/{shareToken}/shipping/quotes", shareToken)
-                        .header("X-Order-Access-Token", buyer.accessToken()))
+        JsonNode quotes = responseJson(mockMvc.perform(post("/orders/{orderId}/shipping/quotes", orderId)
+                        .with(user(creator.getEmail()).roles("USER")))
                 .andExpect(status().isOk()));
         assertThat(quotes.size()).isEqualTo(2);
         JsonNode standardQuote = quotes.get(0);
@@ -473,8 +603,8 @@ class OrderFlowIntegrationTest {
         assertThat(persistedQuote.getDeliveryMarkup()).isEqualByComparingTo("1000.00");
 
         JsonNode selection = responseJson(mockMvc.perform(
-                        put("/orders/token/{shareToken}/shipping/selection", shareToken)
-                                .header("X-Order-Access-Token", buyer.accessToken())
+                        put("/orders/{orderId}/shipping/selection", orderId)
+                                .with(user(creator.getEmail()).roles("USER"))
                                 .contentType(MediaType.APPLICATION_JSON)
                                 .content("{\"quoteId\":" + quoteId + "}"))
                 .andExpect(status().isOk())
@@ -482,6 +612,14 @@ class OrderFlowIntegrationTest {
         assertPricing(selection.path("pricing"), "6000.00", "131500.00");
         assertThat(selection.path("fundingMode").asText()).isEqualTo("PAYSTACK_CHECKOUT");
         assertThat(selection.hasNonNull("paymentInstructions")).isFalse();
+        assertThat(selection.path("buyerPaymentLink").asText()).endsWith("/orders/token/" + shareToken);
+
+        getPublicOrder(shareToken);
+        VerifiedGuest buyer = submitAndVerifyGuest(
+                shareToken,
+                buyerCounterpartyJson(false),
+                CreatorRole.BUYER
+        );
 
         JsonNode buyerStatus = getGuestStatus(shareToken, buyer.accessToken());
         assertThat(buyerStatus.path("status").asText()).isEqualTo("AWAITING_PAYMENT");
@@ -599,9 +737,7 @@ class OrderFlowIntegrationTest {
         assertThat(selectedOrder.getDeliveryFee()).isEqualByComparingTo("6000.00");
         assertThat(selectedOrder.getServiceFee()).isEqualByComparingTo("500.00");
         assertThat(selectedOrder.getTotalAmount()).isEqualByComparingTo("131500.00");
-        verify(payoutProvider, never()).listBanks();
-        verify(payoutProvider, never()).resolveBankAccount(any());
-        verify(payoutProvider, never()).createPayoutRecipient(any());
+        verify(payoutProvider).createPayoutRecipient(any());
         verify(payoutProvider, never()).initiatePayout(any());
     }
 
@@ -670,7 +806,7 @@ class OrderFlowIntegrationTest {
         verify(paymentProvider).createVirtualAccount(argThat(request ->
                 request.customerName().equals("New Member")
                         && request.email().equals("new-member@example.com")
-                        && request.phone().equals("2348066666666")
+                        && request.phone().equals("+2348066666666")
                         && request.customerReference().equals("user-" + verifiedUser.getId())
         ));
     }
@@ -762,32 +898,38 @@ class OrderFlowIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.userId").value(incompleteUser.getId()))
                 .andExpect(jsonPath("$.firstname").value("Updated"))
-                .andExpect(jsonPath("$.phoneNumber").value("2348055555555"))
+                .andExpect(jsonPath("$.phoneNumber").value("+2348055555555"))
                 .andExpect(jsonPath("$.virtualAccount.accountNumber").value("9999999999"))
                 .andExpect(jsonPath("$.virtualAccount.bankName").value("Wema Bank"));
 
         User updated = userRepository.findById(incompleteUser.getId()).orElseThrow();
         VirtualAccount account = virtualAccountRepository.findByUser_Id(incompleteUser.getId()).orElseThrow();
-        assertThat(updated.getPhoneNumber()).isEqualTo("2348055555555");
+        assertThat(updated.getPhoneNumber()).isEqualTo("+2348055555555");
         assertThat(account.getAccountNumber()).isEqualTo("9999999999");
         verify(paymentProvider).createVirtualAccount(argThat(request ->
                 request.customerName().equals("Updated Member")
                         && request.email().equals("existing-member@example.com")
-                        && request.phone().equals("2348055555555")
+                        && request.phone().equals("+2348055555555")
                         && request.customerReference().equals("user-" + incompleteUser.getId())
         ));
     }
 
     @Test
-    void counterpartyResubmissionInvalidatesPriorOtpAndOnlyLatestChallengeVerifies() throws Exception {
+    void buyerPaymentOtpResendInvalidatesPriorChallengeAndOnlyLatestVerifies() throws Exception {
         JsonNode created = createOrder(CreatorRole.VENDOR, parcelJson("3.000"));
         long orderId = created.path("id").asLong();
         String shareToken = created.path("shareToken").asText();
+        JsonNode quotes = responseJson(mockMvc.perform(post("/orders/{orderId}/shipping/quotes", orderId)
+                        .with(user(creator.getEmail()).roles("USER")))
+                .andExpect(status().isOk()));
+        mockMvc.perform(put("/orders/{orderId}/shipping/selection", orderId)
+                        .with(user(creator.getEmail()).roles("USER"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"quoteId\":" + quotes.get(0).path("quoteId").asLong() + "}"))
+                .andExpect(status().isOk());
 
         JsonNode firstChallenge = responseJson(mockMvc.perform(
-                        post("/orders/token/{shareToken}/counterparty-info", shareToken)
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .content(buyerCounterpartyJson(false)))
+                        post("/orders/token/{shareToken}/payment-access-otp", shareToken))
                 .andExpect(status().isAccepted()));
         String firstCode = deliveredOtp.get();
         var priorChallenge = otpChallengeRepository
@@ -796,16 +938,13 @@ class OrderFlowIntegrationTest {
         priorChallenge.setCreatedAt(LocalDateTime.now().minusMinutes(2));
         otpChallengeRepository.saveAndFlush(priorChallenge);
 
-        String updatedPhone = "2348088888888";
-        String updatedEmail = "updated.buyer@example.com";
         deliveredOtp.set(null);
         JsonNode latestChallenge = responseJson(mockMvc.perform(
-                        post("/orders/token/{shareToken}/counterparty-info", shareToken)
+                        post("/orders/token/{shareToken}/resend-otp", shareToken)
                                 .contentType(MediaType.APPLICATION_JSON)
-                                .content(buyerCounterpartyJson(false)
-                                        .replace(GUEST_PHONE, updatedPhone)
-                                        .replace("bisi.buyer@example.com", updatedEmail)))
-                .andExpect(status().isAccepted()));
+                                .content("{\"challengeId\":\""
+                                        + firstChallenge.path("challengeId").asText() + "\"}"))
+                .andExpect(status().isOk()));
         String latestCode = deliveredOtp.get();
 
         assertThat(otpChallengeRepository.findByPublicId(firstChallenge.path("challengeId").asText())
@@ -824,12 +963,12 @@ class OrderFlowIntegrationTest {
                                 {"challengeId":"%s","code":"%s"}
                                 """.formatted(latestChallenge.path("challengeId").asText(), latestCode)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("AWAITING_SHIPPING_RATE"))
+                .andExpect(jsonPath("$.status").value("AWAITING_PAYMENT"))
                 .andExpect(jsonPath("$.guestAccessToken").isNotEmpty());
 
         var counterparty = counterpartyRepository.findByOrder_Id(orderId).orElseThrow();
-        assertThat(counterparty.getPhoneNumber()).isEqualTo(updatedPhone);
-        assertThat(counterparty.getEmail()).isEqualTo(updatedEmail);
+        assertThat(counterparty.getPhoneNumber()).isEqualTo("+" + GUEST_PHONE);
+        assertThat(counterparty.getEmail()).isEqualTo("bisi.buyer@example.com");
         assertThat(counterparty.isPhoneVerified()).isTrue();
         assertThat(otpChallengeRepository.findByPublicId(firstChallenge.path("challengeId").asText())
                 .orElseThrow().getConsumedAt()).isNull();
@@ -845,6 +984,7 @@ class OrderFlowIntegrationTest {
         JsonNode created = createOrder(CreatorRole.VENDOR, parcelJson("3.000"));
         long orderId = created.path("id").asLong();
         String shareToken = created.path("shareToken").asText();
+        selectFirstCreatorQuote(orderId);
         VerifiedGuest original = submitAndVerifyGuest(
                 shareToken,
                 buyerCounterpartyJson(false),
@@ -859,7 +999,7 @@ class OrderFlowIntegrationTest {
 
         JsonNode revokedRecoveryChallenge = requestAccessRecovery(shareToken);
         String revokedRecoveryCode = deliveredOtp.get();
-        assertRecoveryOtpDelivered("2348012345678", "bisi.buyer@example.com", revokedRecoveryCode);
+        assertRecoveryOtpDelivered("+2348012345678", "bisi.buyer@example.com", revokedRecoveryCode);
         String recoveredToken = recoverAccess(
                 shareToken,
                 revokedRecoveryChallenge.path("challengeId").asText(),
@@ -877,7 +1017,7 @@ class OrderFlowIntegrationTest {
 
         JsonNode expiredRecoveryChallenge = requestAccessRecovery(shareToken);
         String expiredRecoveryCode = deliveredOtp.get();
-        assertRecoveryOtpDelivered("2348012345678", "bisi.buyer@example.com", expiredRecoveryCode);
+        assertRecoveryOtpDelivered("+2348012345678", "bisi.buyer@example.com", expiredRecoveryCode);
         String latestToken = recoverAccess(
                 shareToken,
                 expiredRecoveryChallenge.path("challengeId").asText(),
@@ -897,22 +1037,12 @@ class OrderFlowIntegrationTest {
         JsonNode created = createOrder(CreatorRole.VENDOR, parcelJson("3.000"));
         long orderId = created.path("id").asLong();
         String shareToken = created.path("shareToken").asText();
+        JsonNode selection = selectFirstCreatorQuote(orderId);
         VerifiedGuest buyer = submitAndVerifyGuest(
                 shareToken,
                 buyerCounterpartyJson(false),
                 CreatorRole.BUYER
         );
-        JsonNode quotes = responseJson(mockMvc.perform(
-                        post("/orders/token/{shareToken}/shipping/quotes", shareToken)
-                                .header("X-Order-Access-Token", buyer.accessToken()))
-                .andExpect(status().isOk()));
-        JsonNode selection = responseJson(mockMvc.perform(
-                        put("/orders/token/{shareToken}/shipping/selection", shareToken)
-                                .header("X-Order-Access-Token", buyer.accessToken())
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .content("{\"quoteId\":" + quotes.get(0).path("quoteId").asLong() + "}"))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("AWAITING_PAYMENT")));
         assertThat(selection.path("fundingMode").asText()).isEqualTo("PAYSTACK_CHECKOUT");
         assertThat(selection.hasNonNull("paymentInstructions")).isFalse();
         assertThat(getGuestStatus(shareToken, buyer.accessToken()).hasNonNull("paymentInstructions"))
@@ -958,6 +1088,17 @@ class OrderFlowIntegrationTest {
 
         JsonNode fundedStatus = getGuestStatus(shareToken, buyer.accessToken());
         assertThat(fundedStatus.path("status").asText()).isEqualTo("READY_FOR_DELIVERY");
+        String trackingUrl = fundedStatus.path("shipping").path("shopSecureTrackingUrl").asText();
+        assertThat(trackingUrl).startsWith("http://localhost:3000/orders/tracking/");
+        JsonNode creatorFundedOrder = responseJson(mockMvc.perform(get("/orders/{orderId}", orderId)
+                        .with(user(creator.getEmail()).roles("USER")))
+                .andExpect(status().isOk()));
+        assertThat(creatorFundedOrder.path("shipping").path("shopSecureTrackingUrl").asText())
+                .isEqualTo(trackingUrl);
+        String trackingToken = trackingUrl.substring(trackingUrl.lastIndexOf('/') + 1);
+        mockMvc.perform(get("/orders/tracking/{trackingToken}", trackingToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.trackingStatus").value("AWAITING_PICKUP"));
         assertThat(fundedStatus.hasNonNull("paymentInstructions")).isFalse();
         assertThat(fundedStatus.toString()).doesNotContain(CREATOR_VIRTUAL_ACCOUNT);
         mockMvc.perform(post("/orders/token/{shareToken}/payments/checkout", shareToken)
@@ -978,7 +1119,7 @@ class OrderFlowIntegrationTest {
                         && html.contains("delivery partner will contact you"))
         );
         verify(smsProvider, times(1)).sendMessage(
-                eq(creator.getPhoneNumber()),
+                eq("+" + creator.getPhoneNumber()),
                 argThat(message -> message.contains("Buyer payment is confirmed")
                         && message.contains("delivery partner will contact you"))
         );
@@ -990,7 +1131,7 @@ class OrderFlowIntegrationTest {
                         && html.contains("NGN 131,500.00"))
         );
         verify(smsProvider, times(1)).sendMessage(
-                eq(GUEST_PHONE),
+                eq("+" + GUEST_PHONE),
                 argThat(message -> message.contains("Your order has been created")
                         && message.contains("vendor has been notified"))
         );
@@ -998,14 +1139,15 @@ class OrderFlowIntegrationTest {
 
     @Test
     void publicVerificationIssuesTokenWhileGuestAndCreatorDetailsRemainProtected() throws Exception {
-        JsonNode created = createOrder(CreatorRole.BUYER, null);
+        JsonNode created = createOrder(CreatorRole.VENDOR, parcelJson("2.000"));
         long orderId = created.path("id").asLong();
         String shareToken = created.path("shareToken").asText();
+        selectFirstCreatorQuote(orderId);
 
-        VerifiedGuest vendor = submitAndVerifyGuest(
+        VerifiedGuest buyer = submitAndVerifyGuest(
                 shareToken,
-                vendorCounterpartyJson(true),
-                CreatorRole.VENDOR
+                buyerCounterpartyJson(false),
+                CreatorRole.BUYER
         );
 
         mockMvc.perform(get("/orders/token/{shareToken}/status", shareToken))
@@ -1018,26 +1160,26 @@ class OrderFlowIntegrationTest {
                 .andExpect(status().isForbidden());
 
         mockMvc.perform(get("/orders/token/{shareToken}/status", shareToken)
-                        .header("X-Order-Access-Token", vendor.accessToken()))
+                        .header("X-Order-Access-Token", buyer.accessToken()))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("AWAITING_SHIPPING_RATE"));
+                .andExpect(jsonPath("$.status").value("AWAITING_PAYMENT"));
     }
 
     @Test
-    void sellerParcelRulesAndIsoCountryAndPostalCodeAreValidated() throws Exception {
+    void completeOrderParcelAndIsoCountryAndPostalCodeAreValidated() throws Exception {
         mockMvc.perform(post("/orders")
                         .with(user(creator.getEmail()).roles("USER"))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(orderJson(CreatorRole.VENDOR, null)))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("A vendor creator must provide parcel details"));
+                .andExpect(jsonPath("$.details.parcel").value("Parcel is required"));
 
         mockMvc.perform(post("/orders")
                         .with(user(creator.getEmail()).roles("USER"))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(orderJson(CreatorRole.BUYER, parcelJson("2.000"))))
+                        .content(orderJson(CreatorRole.BUYER, null)))
                 .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("The vendor must provide parcel details"));
+                .andExpect(jsonPath("$.details.parcel").value("Parcel is required"));
 
         JsonNode addressErrors = responseJson(mockMvc.perform(post("/orders")
                         .with(user(creator.getEmail()).roles("USER"))
@@ -1045,42 +1187,155 @@ class OrderFlowIntegrationTest {
                         .content(invalidAddressOrderJson()))
                 .andExpect(status().isBadRequest()));
         assertThat(addressErrors.path("details").path("creatorAddress.country").asText())
-                .isEqualTo("Country must be an ISO-2 country code");
+                .isEqualTo("Only Nigerian shipping addresses are supported");
         assertThat(addressErrors.path("details").path("creatorAddress.postalCode").asText())
                 .isEqualTo("Postal code is required");
 
-        JsonNode buyerOrder = createOrder(CreatorRole.BUYER, null);
-        mockMvc.perform(post("/orders/token/{shareToken}/counterparty-info", buyerOrder.path("shareToken").asText())
+    }
+
+    @Test
+    void creatorOrdersArePaginatedNewestFirst() throws Exception {
+        JsonNode firstOrder = createOrder(CreatorRole.BUYER, null);
+        JsonNode secondOrder = createOrder(CreatorRole.BUYER, null);
+        long firstId = firstOrder.path("id").asLong();
+        long secondId = secondOrder.path("id").asLong();
+
+        mockMvc.perform(get("/orders")
+                        .with(user(creator.getEmail()).roles("USER"))
+                        .param("page", "0")
+                        .param("size", "1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content[0].id").value(secondId))
+                .andExpect(jsonPath("$.content[0].buyerPaymentLink").doesNotExist())
+                .andExpect(jsonPath("$.page").value(0))
+                .andExpect(jsonPath("$.size").value(1))
+                .andExpect(jsonPath("$.totalElements").value(2))
+                .andExpect(jsonPath("$.totalPages").value(2))
+                .andExpect(jsonPath("$.first").value(true))
+                .andExpect(jsonPath("$.last").value(false));
+
+        mockMvc.perform(get("/orders")
+                        .with(user(creator.getEmail()).roles("USER"))
+                        .param("page", "1")
+                        .param("size", "1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content[0].id").value(firstId))
+                .andExpect(jsonPath("$.content[0].buyerPaymentLink").doesNotExist())
+                .andExpect(jsonPath("$.first").value(false))
+                .andExpect(jsonPath("$.last").value(true));
+
+        mockMvc.perform(get("/orders/{orderId}", secondId)
+                .with(user(creator.getEmail()).roles("USER")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.buyerPaymentLink").doesNotExist());
+    }
+
+    @Test
+    void sellerPendingAmountAggregatesActiveSellerProceedsAcrossBothParticipantPositions() throws Exception {
+        Order activeUnfunded = orderRepository.findById(
+                createOrder(CreatorRole.VENDOR, parcelJson("1.000")).path("id").asLong()
+        ).orElseThrow();
+        Order activeFunded = orderRepository.findById(
+                createOrder(CreatorRole.VENDOR, parcelJson("1.000")).path("id").asLong()
+        ).orElseThrow();
+        activeFunded.setStatus(OrderStatus.READY_FOR_DELIVERY);
+        activeFunded.setPaymentStatus(PaymentStatus.CONFIRMED);
+        activeFunded.setFundedAt(Instant.now());
+        activeFunded.setUpdatedAt(Instant.now());
+        orderRepository.save(activeFunded);
+
+        Order cancelled = orderRepository.findById(
+                createOrder(CreatorRole.VENDOR, parcelJson("1.000")).path("id").asLong()
+        ).orElseThrow();
+        cancelled.setStatus(OrderStatus.CANCELLED);
+        cancelled.setUpdatedAt(Instant.now());
+        orderRepository.save(cancelled);
+
+        Order settled = orderRepository.findById(
+                createOrder(CreatorRole.VENDOR, parcelJson("1.000")).path("id").asLong()
+        ).orElseThrow();
+        settled.setStatus(OrderStatus.COMPLETED);
+        settled.setPaymentStatus(PaymentStatus.CONFIRMED);
+        settled.setSettlementStatus(SettlementStatus.COMPLETED);
+        settled.setFundedAt(Instant.now());
+        settled.setCompletedAt(Instant.now());
+        settled.setUpdatedAt(Instant.now());
+        orderRepository.save(settled);
+
+        createVirtualAccount(otherUser, "2222222222", "OTHER BUYER");
+        long buyerCreatedOrderId = responseJson(mockMvc.perform(post("/orders")
+                        .with(user(otherUser.getEmail()).roles("USER"))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(vendorCounterpartyJson(false)))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("Vendor parcel details are required"));
-        assertThat(deliveredOtp.get()).isNull();
+                        .content(orderJson(CreatorRole.BUYER, parcelJson("1.000"))))
+                .andExpect(status().isCreated()))
+                .path("id").asLong();
+        Order buyerCreatedOrder = orderRepository.findById(buyerCreatedOrderId).orElseThrow();
+        buyerCreatedOrder.setStatus(OrderStatus.AWAITING_PAYMENT);
+        buyerCreatedOrder.setUpdatedAt(Instant.now());
+        orderRepository.save(buyerCreatedOrder);
+        OrderCounterparty sellerCounterparty = counterpartyRepository
+                .findByOrder_Id(buyerCreatedOrderId)
+                .orElseThrow();
+        sellerCounterparty.setUser(creator);
+        sellerCounterparty.setFirstName(creator.getFirstname());
+        sellerCounterparty.setLastName(creator.getLastname());
+        sellerCounterparty.setPhoneNumber(creator.getPhoneNumber());
+        sellerCounterparty.setEmail(creator.getEmail());
+        sellerCounterparty.setPhoneVerified(true);
+        sellerCounterparty.setUpdatedAt(Instant.now());
+        counterpartyRepository.save(sellerCounterparty);
+
+        JsonNode summary = responseJson(mockMvc.perform(get("/orders/seller/pending-amount")
+                        .with(user(creator.getEmail()).roles("USER")))
+                .andExpect(status().isOk()));
+        assertThat(summary.path("pendingAmount").decimalValue())
+                .isEqualByComparingTo("375000.00");
+        assertThat(summary.path("fundedPendingAmount").decimalValue())
+                .isEqualByComparingTo("125000.00");
+        assertThat(summary.path("awaitingFundingAmount").decimalValue())
+                .isEqualByComparingTo("250000.00");
+        assertThat(summary.path("activeOrderCount").asLong()).isEqualTo(3);
+        assertThat(summary.path("fundedOrderCount").asLong()).isEqualTo(1);
+        assertThat(summary.path("currency").asText()).isEqualTo("NGN");
+        assertThat(summary.path("asOf").asText()).isNotBlank();
+
+        mockMvc.perform(get("/orders/seller/pending-amount")
+                        .with(user(otherUser.getEmail()).roles("USER")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pendingAmount").value(0.00))
+                .andExpect(jsonPath("$.activeOrderCount").value(0));
+        mockMvc.perform(get("/orders/seller/pending-amount"))
+                .andExpect(status().isForbidden());
+
+        assertThat(activeUnfunded.getPaymentStatus()).isEqualTo(PaymentStatus.NOT_STARTED);
     }
 
     private JsonNode createOrder(CreatorRole creatorRole, String parcel) throws Exception {
-        return responseJson(mockMvc.perform(post("/orders")
+        String completeParcel = parcel == null ? parcelJson("2.000") : parcel;
+        JsonNode response = responseJson(mockMvc.perform(post("/orders")
                         .with(user(creator.getEmail()).roles("USER"))
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(orderJson(creatorRole, parcel)))
+                        .content(orderJson(creatorRole, completeParcel)))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.status").value("AWAITING_COUNTERPARTY"))
+                .andExpect(jsonPath("$.status").value("AWAITING_SHIPPING_RATE"))
                 .andExpect(jsonPath("$.creatorRole").value(creatorRole.name()))
                 .andExpect(jsonPath("$.counterpartyRole").value(creatorRole.opposite().name()))
-                .andExpect(jsonPath("$.shareToken").isNotEmpty())
-                .andExpect(jsonPath("$.shareableLink").isNotEmpty()));
+                .andExpect(jsonPath("$.shareToken").doesNotExist())
+                .andExpect(jsonPath("$.shareableLink").doesNotExist()));
+        Order persisted = orderRepository.findById(response.path("id").asLong()).orElseThrow();
+        ((ObjectNode) response).put("shareToken", persisted.getShareToken());
+        return response;
     }
 
     private VerifiedGuest submitAndVerifyGuest(
             String shareToken,
-            String counterpartyJson,
+            String ignoredCounterpartyJson,
             CreatorRole expectedRole
     ) throws Exception {
+        assertThat(expectedRole).isEqualTo(CreatorRole.BUYER);
         deliveredOtp.set(null);
         JsonNode challenge = responseJson(mockMvc.perform(
-                        post("/orders/token/{shareToken}/counterparty-info", shareToken)
-                                .contentType(MediaType.APPLICATION_JSON)
-                                .content(counterpartyJson))
+                        post("/orders/token/{shareToken}/payment-access-otp", shareToken))
                 .andExpect(status().isAccepted())
                 .andExpect(jsonPath("$.counterpartyRole").value(expectedRole.name()))
                 .andExpect(jsonPath("$.challengeId").isNotEmpty()));
@@ -1093,7 +1348,7 @@ class OrderFlowIntegrationTest {
                                 {"challengeId":"%s","code":"%s"}
                                 """.formatted(challenge.path("challengeId").asText(), otp)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("AWAITING_SHIPPING_RATE"))
+                .andExpect(jsonPath("$.status").value("AWAITING_PAYMENT"))
                 .andExpect(jsonPath("$.counterpartyRole").value(expectedRole.name()))
                 .andExpect(jsonPath("$.phoneVerified").value(true))
                 .andExpect(jsonPath("$.guestAccessToken").isNotEmpty())
@@ -1103,6 +1358,18 @@ class OrderFlowIntegrationTest {
         assertThat(otpChallengeRepository.findByPublicId(challenge.path("challengeId").asText())
                 .orElseThrow().getConsumedAt()).isNotNull();
         return new VerifiedGuest(verification.path("guestAccessToken").asText());
+    }
+
+    private JsonNode selectFirstCreatorQuote(long orderId) throws Exception {
+        JsonNode quotes = responseJson(mockMvc.perform(post("/orders/{orderId}/shipping/quotes", orderId)
+                        .with(user(creator.getEmail()).roles("USER")))
+                .andExpect(status().isOk()));
+        return responseJson(mockMvc.perform(put("/orders/{orderId}/shipping/selection", orderId)
+                        .with(user(creator.getEmail()).roles("USER"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"quoteId\":" + quotes.get(0).path("quoteId").asLong() + "}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("AWAITING_PAYMENT")));
     }
 
     private JsonNode getPublicOrder(String shareToken) throws Exception {
@@ -1222,6 +1489,9 @@ class OrderFlowIntegrationTest {
 
     private String orderJson(CreatorRole creatorRole, String parcel) {
         String parcelField = parcel == null ? "" : ",\n  \"parcel\":" + parcel;
+        String counterparty = creatorRole == CreatorRole.BUYER
+                ? vendorPartyJson()
+                : buyerPartyJson();
         return """
                 {
                   "amount":125000.00,
@@ -1234,26 +1504,58 @@ class OrderFlowIntegrationTest {
                     "state":"Lagos",
                     "country":"NG",
                     "postalCode":"101233"
+                  },
+                  "counterparty":%s,
+                  "vendorBankAccount":{
+                    "accountNumber":"0123456789",
+                    "bankCode":"%s"
                   }%s
                 }
-                """.formatted(creatorRole.name(), parcelField);
+                """.formatted(creatorRole.name(), counterparty, TEST_BANK_CODE, parcelField);
     }
 
     private String invalidAddressOrderJson() {
+        return orderJson(CreatorRole.BUYER, parcelJson("2.000"))
+                .replace("\"country\":\"NG\",\n    \"postalCode\":\"101233\"",
+                        "\"country\":\"Nigeria\",\n    \"postalCode\":\"\"");
+    }
+
+    private String vendorPartyJson() {
         return """
                 {
-                  "amount":125000.00,
-                  "itemDescription":"MacBook Air M3",
-                  "creatorRole":"BUYER",
-                  "creatorAddress":{
-                    "line1":"20 Admiralty Way",
+                  "firstName":"Bola",
+                  "lastName":"Vendor",
+                  "email":"bola.vendor@example.com",
+                  "phoneNumber":"%s",
+                  "address":{
+                    "line1":"12 Marina Road",
+                    "line2":"Suite 4",
                     "city":"Lagos",
                     "state":"Lagos",
-                    "country":"Nigeria",
-                    "postalCode":""
+                    "country":"NG",
+                    "postalCode":"100221"
                   }
                 }
-                """;
+                """.formatted(GUEST_PHONE).trim();
+    }
+
+    private String buyerPartyJson() {
+        return """
+                {
+                  "firstName":"Bisi",
+                  "lastName":"Buyer",
+                  "email":"bisi.buyer@example.com",
+                  "phoneNumber":"%s",
+                  "address":{
+                    "line1":"8 Broad Street",
+                    "line2":"",
+                    "city":"Lagos",
+                    "state":"Lagos",
+                    "country":"NG",
+                    "postalCode":"100001"
+                  }
+                }
+                """.formatted(GUEST_PHONE).trim();
     }
 
     private String vendorCounterpartyJson(boolean includeParcel) {

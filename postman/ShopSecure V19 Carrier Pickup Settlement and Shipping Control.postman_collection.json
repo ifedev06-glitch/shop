@@ -1,0 +1,432 @@
+{
+  "info": {
+    "_postman_id": "a938299f-c207-4a14-a794-a8808d3c6584",
+    "name": "ShopSecure V19 Carrier Pickup Settlement and Shipping Control",
+    "description": "Authoritative complete-at-creation escrow, automatic carrier-pickup settlement, custom order tracking, waybill, and audited Chowdeck-control workflows. Run after authentication has populated {{jwt}}. OTP values and provider checkout completion remain manual checkpoints.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      { "key": "token", "value": "{{jwt}}", "type": "string" }
+    ]
+  },
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.test('Response time is below 10 seconds', () => pm.expect(pm.response.responseTime).to.be.below(10000));",
+          "if (pm.response.code >= 400) console.warn('ShopSecure error response:', pm.response.text());"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "01 - Buyer-Created Escrow",
+      "description": "The buyer creates the complete order, selects delivery, and pays the entire frozen total from their wallet. No buyer payment link is created; a separate bearer tracking link activates after funding.",
+      "item": [
+        {
+          "name": "01 Create Complete Buyer Order",
+          "event": [{
+            "listen": "test",
+            "script": { "type": "text/javascript", "exec": [
+              "pm.test('Complete buyer order created', () => pm.response.to.have.status(201));",
+              "if (pm.response.code === 201) { const data = pm.response.json(); pm.environment.set('buyerOrderId', data.id); pm.test('No create-time token or link', () => { pm.expect(data).not.to.have.property('shareToken'); pm.expect(data).not.to.have.property('shareableLink'); }); }"
+            ] }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "options": { "raw": { "language": "json" } }, "raw": "{\n  \"amount\": {{buyerOrderAmount}},\n  \"itemDescription\": \"{{buyerItemDescription}}\",\n  \"creatorRole\": \"BUYER\",\n  \"creatorAddress\": {\n    \"line1\": \"20 Admiralty Way\",\n    \"line2\": \"Lekki Phase 1\",\n    \"city\": \"Lagos\",\n    \"state\": \"Lagos\",\n    \"country\": \"NG\",\n    \"postalCode\": \"101233\"\n  },\n  \"counterparty\": {\n    \"firstName\": \"{{guestVendorFirstName}}\",\n    \"lastName\": \"{{guestVendorLastName}}\",\n    \"email\": \"{{guestVendorEmail}}\",\n    \"phoneNumber\": \"{{guestVendorPhone}}\",\n    \"address\": {\n      \"line1\": \"12 Marina Road\",\n      \"line2\": \"Suite 4\",\n      \"city\": \"Lagos\",\n      \"state\": \"Lagos\",\n      \"country\": \"NG\",\n      \"postalCode\": \"100221\"\n    }\n  },\n  \"parcel\": {\n    \"weightKg\": 2.000,\n    \"lengthCm\": 40.00,\n    \"widthCm\": 30.00,\n    \"heightCm\": 15.00\n  },\n  \"vendorBankAccount\": {\n    \"accountNumber\": \"{{bankAccountNumber}}\",\n    \"bankCode\": \"{{bankCode}}\"\n  }\n}" },
+            "url": "{{baseUrl}}/orders"
+          },
+          "response": []
+        },
+        {
+          "name": "02 Creator Requests Quotes",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Quotes returned', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); pm.expect(data.length).to.be.above(0); pm.environment.set('buyerQuoteId', data[0].quoteId); pm.environment.set('buyerQuoteExpiresAt', data[0].expiresAt); }"
+          ] } }],
+          "request": { "method": "POST", "header": [], "url": "{{baseUrl}}/orders/{{buyerOrderId}}/shipping/quotes" },
+          "response": []
+        },
+        {
+          "name": "03 Creator Selects Quote",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Quote selected', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('buyerOrderTotal', data.pricing.totalAmount); pm.test('Buyer creator has no payment link', () => pm.expect(data.buyerPaymentLink).to.eql(null)); }"
+          ] } }],
+          "request": { "method": "PUT", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "options": { "raw": { "language": "json" } }, "raw": "{\n  \"quoteId\": {{buyerQuoteId}}\n}" }, "url": "{{baseUrl}}/orders/{{buyerOrderId}}/shipping/selection" },
+          "response": []
+        },
+        {
+          "name": "04 Pay Full Total From Wallet",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["if (!pm.environment.get('buyerWalletPaymentKey')) pm.environment.set('buyerWalletPaymentKey', pm.variables.replaceIn('{{$guid}}'));"] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('Wallet payment processed', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) { const data = pm.response.json(); const account = data.topUpInstructions && data.topUpInstructions.virtualAccount; pm.environment.set('walletShortfall', data.shortfall == null ? '' : data.shortfall); pm.environment.set('topUpAccountNumber', account ? account.accountNumber : ''); pm.environment.set('topUpBankName', account ? account.bankName : ''); pm.test('Wallet funded the order', () => pm.expect(data.outcome).to.eql('FUNDED')); if (data.outcome === 'INSUFFICIENT_FUNDS') { pm.environment.set('buyerWalletPaymentKey', ''); console.warn('Top up the displayed DVA, then rerun wallet payment; a new key will be generated.'); if (pm.execution && pm.execution.setNextRequest) pm.execution.setNextRequest(null); } }"
+            ] } }
+          ],
+          "request": { "method": "POST", "header": [{ "key": "Idempotency-Key", "value": "{{buyerWalletPaymentKey}}" }], "url": "{{baseUrl}}/orders/{{buyerOrderId}}/payments/wallet" },
+          "response": []
+        },
+        {
+          "name": "05 Get Buyer Order",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Order returned', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); pm.test('Frozen vendor payout is visible', () => pm.expect(data.vendorPayoutAccount).to.be.an('object')); const link = data.shipping && data.shipping.shopSecureTrackingUrl; pm.expect(link).to.be.a('string'); pm.environment.set('buyerOrderTrackingLink', link); pm.environment.set('buyerOrderTrackingToken', link.split('/').filter(Boolean).pop()); }"
+          ] } }],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/orders/{{buyerOrderId}}" },
+          "response": []
+        },
+        {
+          "name": "06 View Full Public Tracking Snapshot",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Full public tracking snapshot returned', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); pm.expect(data.trackingStatus).to.be.oneOf(['BOOKING', 'AWAITING_PICKUP', 'IN_TRANSIT', 'DELIVERED', 'EXCEPTION', 'CANCELLED']); pm.expect(data.orderId).to.be.a('number'); pm.expect(data.buyer).to.be.an('object'); pm.expect(data.vendor).to.be.an('object'); pm.expect(data.shipment).to.be.an('object'); pm.expect(data.escrow).to.be.an('object'); pm.expect(data.escrow.amountPending).to.be.a('number'); }"
+          ] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "header": [], "url": "{{baseUrl}}/orders/tracking/{{buyerOrderTrackingToken}}", "description": "Public bearer snapshot. No JWT, guest token, or OTP is required. Anyone holding the link can read the complete buyer/vendor, order, shipment, and escrow data." },
+          "response": []
+        },
+        {
+          "name": "07 Poll Automatic Pickup Settlement",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Order returned', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); pm.expect(data.escrowReleasePolicy).to.eql('CARRIER_PICKUP'); pm.environment.set('payoutReference', `shopsecure_order_${pm.environment.get('buyerOrderId')}_payout`); if (data.carrierPickupConfirmedAt) pm.test('Automatic settlement started', () => pm.expect(data.settlementStatus).not.to.eql('NOT_STARTED')); }"
+          ] } }],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/orders/{{buyerOrderId}}", "description": "Repeat after an authenticated carrier update reports IN_TRANSIT. New orders automatically release the item amount to the frozen vendor bank recipient; there is no buyer delivery-confirmation mutation." },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "02 - Vendor-Created Escrow",
+      "description": "The vendor creates the complete order and selects delivery. Selection returns the recorded buyer's payment-only link.",
+      "item": [
+        {
+          "name": "01 Create Complete Vendor Order",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Complete vendor order created', () => pm.response.to.have.status(201));",
+            "if (pm.response.code === 201) { const data = pm.response.json(); pm.environment.set('vendorOrderId', data.id); pm.test('No create-time token or link', () => pm.expect(data).not.to.have.property('shareToken')); }"
+          ] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "options": { "raw": { "language": "json" } }, "raw": "{\n  \"amount\": {{vendorOrderAmount}},\n  \"itemDescription\": \"{{vendorItemDescription}}\",\n  \"creatorRole\": \"VENDOR\",\n  \"creatorAddress\": {\n    \"line1\": \"12 Marina Road\",\n    \"line2\": null,\n    \"city\": \"Lagos\",\n    \"state\": \"Lagos\",\n    \"country\": \"NG\",\n    \"postalCode\": \"100221\"\n  },\n  \"counterparty\": {\n    \"firstName\": \"{{guestBuyerFirstName}}\",\n    \"lastName\": \"{{guestBuyerLastName}}\",\n    \"email\": \"{{guestBuyerEmail}}\",\n    \"phoneNumber\": \"{{guestBuyerPhone}}\",\n    \"address\": {\n      \"line1\": \"8 Broad Street\",\n      \"line2\": null,\n      \"city\": \"Lagos\",\n      \"state\": \"Lagos\",\n      \"country\": \"NG\",\n      \"postalCode\": \"100001\"\n    }\n  },\n  \"parcel\": {\n    \"weightKg\": 2.500,\n    \"lengthCm\": 40.00,\n    \"widthCm\": 30.00,\n    \"heightCm\": 15.00\n  },\n  \"vendorBankAccount\": {\n    \"accountNumber\": \"{{bankAccountNumber}}\",\n    \"bankCode\": \"{{bankCode}}\"\n  }\n}" },
+            "url": "{{baseUrl}}/orders"
+          },
+          "response": []
+        },
+        {
+          "name": "02 Vendor Requests Quotes",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Quotes returned', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); pm.expect(data.length).to.be.above(0); pm.environment.set('vendorQuoteId', data[0].quoteId); }"
+          ] } }],
+          "request": { "method": "POST", "header": [], "url": "{{baseUrl}}/orders/{{vendorOrderId}}/shipping/quotes" },
+          "response": []
+        },
+        {
+          "name": "03 Vendor Selects Quote And Gets Buyer Link",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Quote selected', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); const link = data.buyerPaymentLink; pm.expect(link).to.be.a('string'); const token = link.split('/').filter(Boolean).pop(); pm.environment.set('buyerPaymentLink', link); pm.environment.set('buyerPaymentToken', token); pm.environment.set('activeShareToken', token); pm.environment.set('vendorOrderTotal', data.pricing.totalAmount); }"
+          ] } }],
+          "request": { "method": "PUT", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "options": { "raw": { "language": "json" } }, "raw": "{\n  \"quoteId\": {{vendorQuoteId}}\n}" }, "url": "{{baseUrl}}/orders/{{vendorOrderId}}/shipping/selection" },
+          "response": []
+        },
+        {
+          "name": "04 View Buyer Payment Summary",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Payment summary returned', () => pm.response.to.have.status(200));"] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "header": [], "url": "{{baseUrl}}/orders/token/{{buyerPaymentToken}}" },
+          "response": []
+        },
+        {
+          "name": "05 Request Buyer Payment OTP",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Payment OTP requested', () => pm.response.to.have.status(202));",
+            "if (pm.response.code === 202) pm.environment.set('buyerPaymentChallengeId', pm.response.json().challengeId);"
+          ] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "POST", "header": [], "url": "{{baseUrl}}/orders/token/{{buyerPaymentToken}}/payment-access-otp" },
+          "response": []
+        },
+        {
+          "name": "06 Verify Buyer Payment OTP",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Buyer payment access verified', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('buyerPaymentAccessToken', data.guestAccessToken); pm.environment.set('activeGuestAccessToken', data.guestAccessToken); }"
+          ] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "options": { "raw": { "language": "json" } }, "raw": "{\n  \"challengeId\": \"{{buyerPaymentChallengeId}}\",\n  \"code\": \"{{buyerPaymentOtp}}\"\n}" }, "url": "{{baseUrl}}/orders/token/{{buyerPaymentToken}}/verify-otp" },
+          "response": []
+        },
+        {
+          "name": "07 Initialize Buyer Checkout",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Checkout initialized or replayed', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('checkoutReference', data.reference); pm.environment.set('checkoutAuthorizationUrl', data.authorizationUrl); pm.environment.set('checkoutAccessCode', data.accessCode); pm.environment.set('checkoutAmountMinor', Math.round(Number(data.amount) * 100)); }"
+          ] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "POST", "header": [{ "key": "X-Order-Access-Token", "value": "{{buyerPaymentAccessToken}}" }], "url": "{{baseUrl}}/orders/token/{{buyerPaymentToken}}/payments/checkout" },
+          "response": []
+        },
+        {
+          "name": "08 Poll Buyer Order Status",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Status returned', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); if (data.paymentStatus === 'CONFIRMED') { const link = data.shipping && data.shipping.shopSecureTrackingUrl; pm.expect(link).to.be.a('string'); pm.environment.set('vendorOrderTrackingLink', link); pm.environment.set('vendorOrderTrackingToken', link.split('/').filter(Boolean).pop()); } }"
+          ] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "header": [{ "key": "X-Order-Access-Token", "value": "{{buyerPaymentAccessToken}}" }], "url": "{{baseUrl}}/orders/token/{{buyerPaymentToken}}/status", "description": "Repeat after provider payment and after carrier pickup until the expected payment, shipping, or automatic settlement state appears." },
+          "response": []
+        },
+        {
+          "name": "09 View Full Public Tracking Snapshot",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Full public tracking snapshot returned', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); pm.expect(data.trackingStatus).to.be.oneOf(['BOOKING', 'AWAITING_PICKUP', 'IN_TRANSIT', 'DELIVERED', 'EXCEPTION', 'CANCELLED']); pm.expect(data.orderId).to.be.a('number'); pm.expect(data.buyer).to.be.an('object'); pm.expect(data.vendor).to.be.an('object'); pm.expect(data.shipment).to.be.an('object'); pm.expect(data.escrow).to.be.an('object'); pm.expect(data.escrow.amountPending).to.be.a('number'); }"
+          ] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "header": [], "url": "{{baseUrl}}/orders/tracking/{{vendorOrderTrackingToken}}", "description": "Run after request 08 reports CONFIRMED payment and captures the tracking token. No JWT, guest token, or OTP is required; the bearer response includes complete buyer/vendor, order, shipment, and escrow data." },
+          "response": []
+        },
+        {
+          "name": "10 Poll Automatic Pickup Settlement",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Status returned', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); pm.expect(data.escrowReleasePolicy).to.eql('CARRIER_PICKUP'); pm.environment.set('payoutReference', `shopsecure_order_${pm.environment.get('vendorOrderId')}_payout`); if (data.carrierPickupConfirmedAt) pm.test('Automatic settlement started', () => pm.expect(data.settlementStatus).not.to.eql('NOT_STARTED')); }"
+          ] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "header": [{ "key": "X-Order-Access-Token", "value": "{{buyerPaymentAccessToken}}" }], "url": "{{baseUrl}}/orders/token/{{buyerPaymentToken}}/status", "description": "Repeat after an authenticated carrier update reports IN_TRANSIT. New orders automatically release the item amount to the frozen vendor bank recipient; no delivery OTP is required." },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "03 - Opposite-Party-Paid Waybill",
+      "description": "The creator supplies both parties, chooses the payer role, owns quote selection, and receives a payment-only link after selection.",
+      "item": [
+        {
+          "name": "01 Create Complete Waybill",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["if (!pm.environment.get('waybillCreationKey')) pm.environment.set('waybillCreationKey', pm.variables.replaceIn('{{$guid}}'));"] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('Waybill created', () => pm.response.to.have.status(201));",
+              "if (pm.response.code === 201) { const data = pm.response.json(); pm.environment.set('waybillPublicId', data.details.publicId); pm.test('No creation link', () => pm.expect(data.paymentLink).to.eql(null)); }"
+            ] } }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Idempotency-Key", "value": "{{waybillCreationKey}}" }],
+            "body": { "mode": "raw", "options": { "raw": { "language": "json" } }, "raw": "{\n  \"creatorRole\": \"SENDER\",\n  \"payerRole\": \"RECIPIENT\",\n  \"description\": \"{{waybillDescription}}\",\n  \"declaredValue\": {{waybillDeclaredValue}},\n  \"creatorAddress\": {\n    \"line1\": \"1 Marina Road\",\n    \"line2\": null,\n    \"city\": \"Lagos\",\n    \"state\": \"Lagos\",\n    \"country\": \"NG\",\n    \"postalCode\": \"100001\"\n  },\n  \"parcel\": {\n    \"weightKg\": 2.500,\n    \"lengthCm\": 40.00,\n    \"widthCm\": 30.00,\n    \"heightCm\": 15.00\n  },\n  \"oppositeParty\": {\n    \"firstName\": \"{{waybillPartyFirstName}}\",\n    \"lastName\": \"{{waybillPartyLastName}}\",\n    \"email\": \"{{waybillPartyEmail}}\",\n    \"phoneNumber\": \"{{waybillPartyPhone}}\",\n    \"address\": {\n      \"line1\": \"2 Receiver Road\",\n      \"line2\": null,\n      \"city\": \"Abuja\",\n      \"state\": \"FCT\",\n      \"country\": \"NG\",\n      \"postalCode\": \"900001\"\n    }\n  }\n}" },
+            "url": "{{baseUrl}}/waybills"
+          },
+          "response": []
+        },
+        {
+          "name": "02 Creator Requests Waybill Quotes",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Waybill quotes returned', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); pm.expect(data.length).to.be.above(0); pm.environment.set('waybillQuoteId', data[0].quoteId); }"
+          ] } }],
+          "request": { "method": "POST", "header": [], "url": "{{baseUrl}}/waybills/{{waybillPublicId}}/shipping/quotes" },
+          "response": []
+        },
+        {
+          "name": "03 Creator Selects Quote And Gets Payer Link",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Waybill quote selected', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); const link = data.paymentLink; pm.expect(link).to.be.a('string'); pm.environment.set('waybillPaymentLink', link); pm.environment.set('waybillPaymentToken', link.split('/').filter(Boolean).pop()); pm.environment.set('waybillPaymentLinkExpiresAt', data.paymentLinkExpiresAt); }"
+          ] } }],
+          "request": { "method": "PUT", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "options": { "raw": { "language": "json" } }, "raw": "{\n  \"quoteId\": {{waybillQuoteId}}\n}" }, "url": "{{baseUrl}}/waybills/{{waybillPublicId}}/shipping/selection" },
+          "response": []
+        },
+        {
+          "name": "04 Reissue Payment Link (optional)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Payment link reissued', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('waybillPaymentLink', data.paymentLink); pm.environment.set('waybillPaymentToken', data.paymentLink.split('/').filter(Boolean).pop()); pm.environment.set('waybillPaymentLinkExpiresAt', data.expiresAt); pm.environment.set('waybillPaymentChallengeId', ''); pm.environment.set('waybillPaymentAccessToken', ''); pm.environment.set('waybillCheckoutReference', ''); pm.environment.set('waybillAuthorizationUrl', ''); pm.environment.set('waybillCheckoutAccessCode', ''); pm.environment.set('waybillCheckoutAmountMinor', ''); pm.environment.set('waybillCheckoutKey', pm.variables.replaceIn('{{$guid}}')); }"
+          ] } }],
+          "request": { "method": "POST", "header": [], "url": "{{baseUrl}}/waybills/{{waybillPublicId}}/invitations/reissue" },
+          "response": []
+        },
+        {
+          "name": "05 View Payment Link Summary",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Payment summary returned', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); pm.expect(data.invitationKind).to.eql('PAYMENT_ONLY'); pm.expect(data.detailsRequired).to.eql(false); pm.expect(data.payerRole).to.eql('RECIPIENT'); }"
+          ] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "header": [], "url": "{{baseUrl}}/waybills/invitations/{{waybillPaymentToken}}" },
+          "response": []
+        },
+        {
+          "name": "06 Request Payer OTP",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Payer OTP requested', () => pm.response.to.have.status(202));",
+            "if (pm.response.code === 202) pm.environment.set('waybillPaymentChallengeId', pm.response.json().challengeId);"
+          ] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "POST", "header": [], "url": "{{baseUrl}}/waybills/invitations/{{waybillPaymentToken}}/payment-access-otp" },
+          "response": []
+        },
+        {
+          "name": "07 Verify Payer OTP",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Payer access verified', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) pm.environment.set('waybillPaymentAccessToken', pm.response.json().accessToken);"
+          ] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "options": { "raw": { "language": "json" } }, "raw": "{\n  \"challengeId\": \"{{waybillPaymentChallengeId}}\",\n  \"code\": \"{{waybillPaymentOtp}}\"\n}" }, "url": "{{baseUrl}}/waybills/invitations/{{waybillPaymentToken}}/verify-otp" },
+          "response": []
+        },
+        {
+          "name": "08 Initialize Payer Checkout",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["if (!pm.environment.get('waybillCheckoutKey')) pm.environment.set('waybillCheckoutKey', pm.variables.replaceIn('{{$guid}}'));"] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('Payer checkout initialized', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('waybillCheckoutReference', data.reference); pm.environment.set('waybillAuthorizationUrl', data.authorizationUrl || ''); pm.environment.set('waybillCheckoutAccessCode', data.accessCode || ''); pm.environment.set('waybillCheckoutAmountMinor', Math.round(Number(data.amount) * 100)); }"
+            ] } }
+          ],
+          "request": { "auth": { "type": "noauth" }, "method": "POST", "header": [{ "key": "X-Waybill-Access-Token", "value": "{{waybillPaymentAccessToken}}" }, { "key": "Idempotency-Key", "value": "{{waybillCheckoutKey}}" }], "url": "{{baseUrl}}/waybills/invitations/{{waybillPaymentToken}}/payments/checkout" },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "04 - Creator-Paid Waybill",
+      "item": [
+        {
+          "name": "01 Create Complete Creator-Paid Waybill",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["if (!pm.environment.get('creatorPayWaybillCreationKey')) pm.environment.set('creatorPayWaybillCreationKey', pm.variables.replaceIn('{{$guid}}'));"] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('Creator-paid waybill created', () => pm.response.to.have.status(201));",
+              "if (pm.response.code === 201) pm.environment.set('creatorPayWaybillPublicId', pm.response.json().details.publicId);"
+            ] } }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Idempotency-Key", "value": "{{creatorPayWaybillCreationKey}}" }],
+            "body": { "mode": "raw", "options": { "raw": { "language": "json" } }, "raw": "{\n  \"creatorRole\": \"SENDER\",\n  \"payerRole\": \"SENDER\",\n  \"description\": \"Creator-paid package\",\n  \"declaredValue\": {{waybillDeclaredValue}},\n  \"creatorAddress\": { \"line1\": \"1 Marina Road\", \"line2\": null, \"city\": \"Lagos\", \"state\": \"Lagos\", \"country\": \"NG\", \"postalCode\": \"100001\" },\n  \"parcel\": { \"weightKg\": 2.500, \"lengthCm\": 40.00, \"widthCm\": 30.00, \"heightCm\": 15.00 },\n  \"oppositeParty\": {\n    \"firstName\": \"{{waybillPartyFirstName}}\", \"lastName\": \"{{waybillPartyLastName}}\", \"email\": \"{{waybillPartyEmail}}\", \"phoneNumber\": \"{{waybillPartyPhone}}\",\n    \"address\": { \"line1\": \"2 Receiver Road\", \"line2\": null, \"city\": \"Abuja\", \"state\": \"FCT\", \"country\": \"NG\", \"postalCode\": \"900001\" }\n  }\n}" },
+            "url": "{{baseUrl}}/waybills"
+          },
+          "response": []
+        },
+        {
+          "name": "02 Creator Requests Quotes",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Quotes returned', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) pm.environment.set('creatorPayWaybillQuoteId', pm.response.json()[0].quoteId);"
+          ] } }],
+          "request": { "method": "POST", "header": [], "url": "{{baseUrl}}/waybills/{{creatorPayWaybillPublicId}}/shipping/quotes" },
+          "response": []
+        },
+        {
+          "name": "03 Creator Selects Quote",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Quote selected', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) pm.test('Creator payer has no link', () => pm.expect(pm.response.json().paymentLink).to.eql(null));"
+          ] } }],
+          "request": { "method": "PUT", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "options": { "raw": { "language": "json" } }, "raw": "{\n  \"quoteId\": {{creatorPayWaybillQuoteId}}\n}" }, "url": "{{baseUrl}}/waybills/{{creatorPayWaybillPublicId}}/shipping/selection" },
+          "response": []
+        },
+        {
+          "name": "04 Initialize Creator Checkout",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["if (!pm.environment.get('creatorPayWaybillCheckoutKey')) pm.environment.set('creatorPayWaybillCheckoutKey', pm.variables.replaceIn('{{$guid}}'));"] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('Creator checkout initialized', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('creatorPayWaybillCheckoutReference', data.reference); pm.environment.set('creatorPayWaybillAuthorizationUrl', data.authorizationUrl || ''); pm.environment.set('creatorPayWaybillCheckoutAccessCode', data.accessCode || ''); pm.environment.set('creatorPayWaybillCheckoutAmountMinor', Math.round(Number(data.amount) * 100)); }"
+            ] } }
+          ],
+          "request": { "method": "POST", "header": [{ "key": "Idempotency-Key", "value": "{{creatorPayWaybillCheckoutKey}}" }], "url": "{{baseUrl}}/waybills/{{creatorPayWaybillPublicId}}/payments/checkout" },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "05 - Seller Summary",
+      "item": [{
+        "name": "Get Account-Linked Seller Pending Amount",
+        "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Seller summary returned', () => pm.response.to.have.status(200));"] } }],
+        "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/orders/seller/pending-amount" },
+        "response": []
+      }]
+    },
+    {
+      "name": "06 - Admin Chowdeck Control",
+      "description": "Requires an ADMIN JWT. The default target mode is OFF so an accidental collection run cannot activate Chowdeck.",
+      "item": [
+        {
+          "name": "01 Get Chowdeck Control",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Chowdeck control returned', () => pm.response.to.have.status(200));",
+            "pm.test('Admin response is not cacheable', () => pm.expect(pm.response.headers.get('Cache-Control')).to.eql('no-store'));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('chowdeckControlVersion', data.version); pm.environment.set('chowdeckConfiguredMode', data.configuredMode); pm.test('No provider secret is exposed', () => { pm.expect(data).not.to.have.property('secretKey'); pm.expect(data).not.to.have.property('apiKey'); }); }"
+          ] } }],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/api/admin/shipping/chowdeck-control" },
+          "response": []
+        },
+        {
+          "name": "02 Update Chowdeck Control",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Chowdeck control updated', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('chowdeckControlVersion', data.version); pm.environment.set('chowdeckConfiguredMode', data.configuredMode); pm.test('Requested configured mode persisted', () => pm.expect(data.configuredMode).to.eql(pm.environment.get('chowdeckTargetMode'))); }",
+            "if (pm.response.code === 409) console.warn('Control changed concurrently. Run Get Chowdeck Control and review before retrying.');"
+          ] } }],
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "options": { "raw": { "language": "json" } }, "raw": "{\n  \"mode\": \"{{chowdeckTargetMode}}\",\n  \"expectedVersion\": {{chowdeckControlVersion}},\n  \"reason\": \"{{chowdeckChangeReason}}\"\n}" },
+            "url": "{{baseUrl}}/api/admin/shipping/chowdeck-control"
+          },
+          "response": []
+        },
+        {
+          "name": "03 Get Chowdeck Control History",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Chowdeck control history returned', () => pm.response.to.have.status(200));",
+            "if (pm.response.code === 200) pm.test('History is paginated', () => pm.expect(pm.response.json()).to.have.property('content'));"
+          ] } }],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/api/admin/shipping/chowdeck-control/history?page=0&size=20" },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "07 - Chowdeck Callback Helper",
+      "description": "Backend-only helper for a controlled local/test Chowdeck integration. The callback is unsigned and acts only as a signal to fetch canonical delivery state with the configured Chowdeck integration key. Never use synthetic callbacks against production.",
+      "item": [
+        {
+          "name": "Trigger Authenticated Chowdeck Reconciliation",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": [
+              "if (!pm.environment.get('chowdeckWebhookReference')) throw new Error('Set chowdeckWebhookReference to a persisted Chowdeck order or waybill reference before running this helper.');"
+            ] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('Chowdeck callback acknowledged', () => pm.response.to.have.status(200));",
+              "pm.test('Callback response is empty', () => pm.expect(pm.response.text()).to.eql(''));"
+            ] } }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "options": { "raw": { "language": "json" } }, "raw": "{\n  \"payload\": {\n    \"reference\": \"{{chowdeckWebhookReference}}\"\n  }\n}" },
+            "url": "{{baseUrl}}/api/webhooks/chowdeck",
+            "description": "Set chowdeckWebhookReference to an exact persisted Chowdeck order or waybill reference. Callback status fields are intentionally omitted because the backend ignores them and performs authenticated GET /relay/delivery/{reference}. Unknown references deliberately return the same 200 response, so verify the resulting state through order or waybill tracking."
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080", "type": "string" },
+    { "key": "waybillDescription", "value": "Two sealed document boxes", "type": "string" },
+    { "key": "waybillDeclaredValue", "value": "25000.00", "type": "string" },
+    { "key": "waybillPartyFirstName", "value": "Tobi", "type": "string" },
+    { "key": "waybillPartyLastName", "value": "Adebayo", "type": "string" },
+    { "key": "waybillPartyEmail", "value": "tobi@example.com", "type": "string" },
+    { "key": "waybillPartyPhone", "value": "+2348022222222", "type": "string" }
+  ]
+}

@@ -9,6 +9,8 @@ public record ShippingStatusResponse(
         String carrierName,
         String trackingReference,
         String trackingUrl,
+        String shopSecureTrackingUrl,
+        Instant trackingAvailableAt,
         String deliveryEstimate,
         Instant updatedAt
 ) {

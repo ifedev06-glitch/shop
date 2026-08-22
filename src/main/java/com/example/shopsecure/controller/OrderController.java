@@ -29,8 +29,17 @@ public class OrderController {
     }
 
     @GetMapping
-    public List<OrderDetailsResponse> getOrders() {
-        return orderService.getOrders();
+    public PageResponse<OrderDetailsResponse> getOrders(
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size
+    ) {
+        return orderService.getOrders(page, size);
+    }
+
+    @GetMapping("/seller/pending-amount")
+    @PreAuthorize("isAuthenticated()")
+    public SellerPendingAmountResponse getSellerPendingAmount() {
+        return orderService.getSellerPendingAmount();
     }
 
     @GetMapping("/{orderId}")

@@ -19,6 +19,7 @@ public class GuestOrderStatusService {
     private final OrderShipmentRepository shipmentRepository;
     private final ShippingQuoteRepository quoteRepository;
     private final PaymentReceiptRepository receiptRepository;
+    private final OrderTrackingService trackingService;
 
     @Transactional(readOnly = true)
     public GuestOrderStatusResponse getStatus(String shareToken, String guestToken) {
@@ -39,6 +40,7 @@ public class GuestOrderStatusService {
                 order.getFundingMode(),
                 order.getPaymentStatus(),
                 order.getSettlementStatus(),
+                order.getEscrowReleasePolicy(),
                 order.getTotalAmount(),
                 amountReceived.signum() == 0 ? null : amountReceived,
                 order.getCurrency(),
@@ -51,6 +53,7 @@ public class GuestOrderStatusService {
                 shipping(shipment, quote),
                 order.getFundedAt(),
                 order.getDeliveryConfirmedAt(),
+                order.getCarrierPickupConfirmedAt(),
                 order.getCompletedAt()
         );
     }
@@ -82,11 +85,16 @@ public class GuestOrderStatusService {
         if (shipment == null) {
             return null;
         }
+        OrderTrackingService.TrackingLink trackingLink = trackingService.linkForOrder(
+                shipment.getOrder().getId()
+        );
         return new ShippingStatusResponse(
                 shipment.getStatus(),
                 quote == null ? null : quote.getCarrierName(),
                 shipment.getTrackingReference(),
                 shipment.getTrackingUrl(),
+                trackingLink == null ? null : trackingLink.url(),
+                trackingLink == null ? null : trackingLink.availableAt(),
                 quote == null ? null : quote.getDeliveryEstimate(),
                 shipment.getUpdatedAt()
         );

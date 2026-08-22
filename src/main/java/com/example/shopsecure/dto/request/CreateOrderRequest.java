@@ -28,6 +28,15 @@ public record CreateOrderRequest(
         OrderAddressRequest creatorAddress,
 
         @Valid
-        OrderParcelRequest parcel
+        @NotNull(message = "Counterparty details are required")
+        OrderPartyRequest counterparty,
+
+        @Valid
+        @NotNull(message = "Parcel is required")
+        OrderParcelRequest parcel,
+
+        @Valid
+        @NotNull(message = "Vendor payout bank details are required")
+        ExternalBankAccountRequest vendorBankAccount
 ) {
 }

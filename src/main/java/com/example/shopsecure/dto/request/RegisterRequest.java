@@ -7,6 +7,9 @@ import jakarta.validation.constraints.Size;
 import lombok.Getter;
 import lombok.Setter;
 
+import static com.example.shopsecure.util.NigerianPhoneNumber.INPUT_PATTERN;
+import static com.example.shopsecure.util.NigerianPhoneNumber.VALIDATION_MESSAGE;
+
 @Getter
 @Setter
 public class RegisterRequest {
@@ -25,7 +28,7 @@ public class RegisterRequest {
     private String email;
 
     @NotBlank(message = "Phone number is required")
-    @Pattern(regexp = "^\\d{7,15}$", message = "Phone number must be 7-15 digits")
+    @Pattern(regexp = INPUT_PATTERN, message = VALIDATION_MESSAGE)
     private String phoneNumber;
 
     @NotBlank(message = "Password is required")

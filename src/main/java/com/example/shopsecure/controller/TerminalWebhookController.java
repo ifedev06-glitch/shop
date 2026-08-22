@@ -1,7 +1,7 @@
 package com.example.shopsecure.controller;
 
 import com.example.shopsecure.provider.common.WebhookPayload;
-import com.example.shopsecure.service.OrderShippingService;
+import com.example.shopsecure.service.ShippingWebhookRouter;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -12,11 +12,11 @@ import org.springframework.web.bind.annotation.*;
 @RequiredArgsConstructor
 public class TerminalWebhookController {
 
-    private final OrderShippingService shippingService;
+    private final ShippingWebhookRouter shippingWebhookRouter;
 
     @PostMapping
     @ResponseStatus(HttpStatus.OK)
     public void receive(@RequestBody String rawBody, @RequestHeader HttpHeaders headers) {
-        shippingService.handleWebhook(new WebhookPayload(rawBody, headers.toSingleValueMap()));
+        shippingWebhookRouter.handleWebhook(new WebhookPayload(rawBody, headers.toSingleValueMap()));
     }
 }

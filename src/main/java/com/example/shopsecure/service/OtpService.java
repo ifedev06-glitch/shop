@@ -7,6 +7,8 @@ import com.example.shopsecure.exception.OtpVerificationException;
 import com.example.shopsecure.repository.OtpChallengeRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -14,6 +16,7 @@ import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.Base64;
 
 @Service
@@ -26,7 +29,11 @@ public class OtpService {
 
     private final OtpChallengeRepository otpChallengeRepository;
     private final PasswordEncoder passwordEncoder;
+    private final Environment environment;
     private final SecureRandom secureRandom = new SecureRandom();
+
+    @Value("${loadtest.otp-code:}")
+    private String loadTestOtpCode;
 
     @Transactional
     public IssuedOtp issue(OtpPurpose purpose, String subject, String phoneNumber) {
@@ -38,8 +45,14 @@ public class OtpService {
         return issue(purpose, subject, null, email);
     }
 
-    private IssuedOtp issue(OtpPurpose purpose, String subject, String phoneNumber, String email) {
-        LocalDateTime now = LocalDateTime.now();
+    @Transactional
+    public IssuedOtp issue(
+            OtpPurpose purpose,
+            String subject,
+            String phoneNumber,
+            String email
+    ) {
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
         otpChallengeRepository.findTopByPurposeAndSubjectOrderByCreatedAtDesc(purpose, subject)
                 .filter(challenge -> challenge.getConsumedAt() == null)
                 .filter(challenge -> challenge.getCreatedAt().plus(RESEND_COOLDOWN).isAfter(now))
@@ -54,7 +67,7 @@ public class OtpService {
                     otpChallengeRepository.save(challenge);
                 });
 
-        String code = String.format("%06d", secureRandom.nextInt(1_000_000));
+        String code = issueCode();
         String publicId = randomToken();
         OtpChallenge challenge = otpChallengeRepository.save(OtpChallenge.builder()
                 .publicId(publicId)
@@ -89,7 +102,7 @@ public class OtpService {
     }
 
     private void verify(OtpChallenge challenge, String code) {
-        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime now = LocalDateTime.now(ZoneOffset.UTC);
         if (challenge.getConsumedAt() != null
                 || challenge.getInvalidatedAt() != null
                 || !challenge.getExpiresAt().isAfter(now)) {
@@ -124,9 +137,22 @@ public class OtpService {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }
 
+    private String issueCode() {
+        if (!environment.matchesProfiles("loadtest")) {
+            return String.format("%06d", secureRandom.nextInt(1_000_000));
+        }
+        if (loadTestOtpCode == null || !loadTestOtpCode.matches("\\d{6}")) {
+            throw new IllegalStateException("loadtest.otp-code must contain exactly six digits");
+        }
+        return loadTestOtpCode;
+    }
+
     public record IssuedOtp(String challengeId, String code, LocalDateTime expiresAt) {
         public long expiresInSeconds() {
-            return Math.max(0, Duration.between(LocalDateTime.now(), expiresAt).toSeconds());
+            return Math.max(0, Duration.between(
+                    LocalDateTime.now(ZoneOffset.UTC),
+                    expiresAt
+            ).toSeconds());
         }
     }
 }

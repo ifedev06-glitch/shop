@@ -11,6 +11,7 @@ import java.time.LocalDateTime;
 @Table(name = "orders", indexes = {
         @Index(name = "idx_orders_share_token", columnList = "share_token", unique = true),
         @Index(name = "idx_orders_creator_id", columnList = "creator_id"),
+        @Index(name = "idx_orders_creator_created_id", columnList = "creator_id, created_at, id"),
         @Index(name = "idx_orders_status", columnList = "status")
 })
 @Getter
@@ -97,6 +98,19 @@ public class Order {
     @Column(unique = true, length = 80)
     private String paymentReference;
 
+    @Column(length = 4)
+    private String vendorBankAccountLast4;
+
+    @Column(length = 20)
+    private String vendorBankCode;
+
+    private String vendorBankName;
+
+    private String vendorBankAccountName;
+
+    @Column(length = 100)
+    private String vendorPayoutRecipientCode;
+
     @Builder.Default
     @Enumerated(EnumType.STRING)
     @Column(nullable = false, length = 40)
@@ -107,10 +121,17 @@ public class Order {
     @Column(nullable = false, length = 40)
     private SettlementStatus settlementStatus = SettlementStatus.NOT_STARTED;
 
+    @Builder.Default
+    @Enumerated(EnumType.STRING)
+    @Column(name = "escrow_release_policy", nullable = false, length = 40)
+    private EscrowReleasePolicy escrowReleasePolicy = EscrowReleasePolicy.BUYER_DELIVERY_CONFIRMATION;
+
     @Column(name = "paid_at")
     private Instant fundedAt;
 
     private Instant deliveryConfirmedAt;
+
+    private Instant carrierPickupConfirmedAt;
 
     private Instant completedAt;
 

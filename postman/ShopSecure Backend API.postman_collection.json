@@ -1,0 +1,1676 @@
+{
+  "info": {
+    "_postman_id": "761d231a-c77d-4d50-9d65-c6bda73f99d8",
+    "name": "ShopSecure Backend API",
+    "description": "Legacy V15 reference collection retained for unchanged authentication, wallet, admin, and webhook utilities. Its order and waybill onboarding folders are superseded and must not be run. Use ShopSecure V19 Carrier Pickup Settlement and Shipping Control.postman_collection.json for current behavior.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      { "key": "token", "value": "{{jwt}}", "type": "string" }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "const baseUrl = pm.environment.get('baseUrl') || pm.collectionVariables.get('baseUrl');",
+          "if (baseUrl && baseUrl.endsWith('/')) pm.environment.set('baseUrl', baseUrl.replace(/\\/+$/, ''));"
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.test('Response time is below 10 seconds', () => pm.expect(pm.response.responseTime).to.be.below(10000));",
+          "if (pm.response.code >= 400) console.warn('ShopSecure error response:', pm.response.text());"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "01 - Authentication",
+      "description": "Register and verify a new account, or log into an existing verified account. Paste OTP values into the selected environment before verification requests.",
+      "item": [
+        {
+          "name": "01 Register",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Registration accepted', () => pm.response.to.have.status(202));",
+                  "if (pm.response.code === 202) { const data = pm.response.json(); pm.environment.set('emailVerificationChallengeId', data.challengeId); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstname\": \"{{memberFirstname}}\",\n  \"lastname\": \"{{memberLastname}}\",\n  \"email\": \"{{memberEmail}}\",\n  \"phoneNumber\": \"{{memberPhone}}\",\n  \"password\": \"{{memberPassword}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/auth/register",
+            "description": "Creates an unverified account and emails a six-digit OTP. No JWT, wallet, or virtual account exists until verification succeeds."
+          },
+          "response": []
+        },
+        {
+          "name": "02 Resend Verification OTP (optional)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Verification OTP resent', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) pm.environment.set('emailVerificationChallengeId', pm.response.json().challengeId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{memberEmail}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/auth/resend-verification",
+            "description": "Wait at least 60 seconds after the previous OTP. A new challenge invalidates the old one."
+          },
+          "response": []
+        },
+        {
+          "name": "03 Verify Email",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Email verified', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const data = pm.response.json();",
+                  "  pm.environment.set('jwt', data.token);",
+                  "  pm.environment.set('userId', data.userId);",
+                  "  if (data.virtualAccount) pm.environment.set('virtualAccountNumber', data.virtualAccount.accountNumber);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{memberEmail}}\",\n  \"challengeId\": \"{{emailVerificationChallengeId}}\",\n  \"code\": \"{{emailOtp}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/auth/verify-email",
+            "description": "Enables the account, provisions the wallet and Paystack DVA, and saves the returned JWT."
+          },
+          "response": []
+        },
+        {
+          "name": "04 Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Login successful', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const data = pm.response.json();",
+                  "  pm.environment.set('jwt', data.token);",
+                  "  pm.environment.set('userId', data.userId);",
+                  "  if (data.virtualAccount) pm.environment.set('virtualAccountNumber', data.virtualAccount.accountNumber);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{memberEmail}}\",\n  \"password\": \"{{memberPassword}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/auth/login"
+          },
+          "response": []
+        },
+        {
+          "name": "05 Forgot Password",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('Reset request accepted', () => pm.response.to.have.status(202));"]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{memberEmail}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/auth/forgot-password",
+            "description": "Always returns the same accepted response. Paste the emailed code into passwordResetOtp."
+          },
+          "response": []
+        },
+        {
+          "name": "06 Reset Password",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Password reset', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { pm.environment.set('memberPassword', pm.environment.get('newPassword')); pm.environment.unset('jwt'); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{memberEmail}}\",\n  \"code\": \"{{passwordResetOtp}}\",\n  \"newPassword\": \"{{newPassword}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/auth/reset-password",
+            "description": "Invalidates previously issued JWTs and updates memberPassword in the selected Postman environment. Log in again afterward."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "02 - Account, Locations, Banks and Wallet",
+      "item": [
+        {
+          "name": "01 Get Current User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Current user returned', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { const data = pm.response.json(); if (data.wallet) pm.environment.set('walletBalance', data.wallet.balance); if (data.virtualAccount) pm.environment.set('virtualAccountNumber', data.virtualAccount.accountNumber); }"
+                ]
+              }
+            }
+          ],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/api/users/me" },
+          "response": []
+        },
+        {
+          "name": "02 Update Profile",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Profile updated', () => pm.response.to.have.status(200));"] } }],
+          "request": {
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstname\": \"{{memberFirstname}}\",\n  \"lastname\": \"{{memberLastname}}\",\n  \"phoneNumber\": \"{{memberPhone}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/users/me",
+            "description": "PATCH semantics are replace-like here: firstname, lastname, and phoneNumber are all required."
+          },
+          "response": []
+        },
+        {
+          "name": "03 List Shipping States",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Shipping states returned', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { const data = pm.response.json(); if (Array.isArray(data) && data.length) pm.environment.set('shippingStateCode', data[0].code); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/locations/states",
+            "description": "Returns the backend-cached Nigerian state catalogue. Use code only for the city lookup and submit name in address payloads."
+          },
+          "response": []
+        },
+        {
+          "name": "04 List Cities For State",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('State cities returned', () => pm.response.to.have.status(200));"]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/locations/states/{{shippingStateCode}}/cities",
+            "description": "Returns cached cities for a state code returned by the states request. Submit a selected city name in address payloads."
+          },
+          "response": []
+        },
+        {
+          "name": "05 List Banks",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Banks returned', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { const data = pm.response.json(); if (Array.isArray(data) && data.length) pm.environment.set('bankCode', data[0].code); }"
+                ]
+              }
+            }
+          ],
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "header": [], "url": "{{baseUrl}}/api/banks" },
+          "response": []
+        },
+        {
+          "name": "06 Resolve Bank Account (authenticated)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Bank account resolved', () => pm.response.to.have.status(200));"] } }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"accountNumber\": \"{{bankAccountNumber}}\",\n  \"bankCode\": \"{{bankCode}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/bank-accounts/resolve"
+          },
+          "response": []
+        },
+        {
+          "name": "07 Get Wallet",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Wallet returned', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) pm.environment.set('walletBalance', pm.response.json().balance);"
+                ]
+              }
+            }
+          ],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/api/wallet" },
+          "response": []
+        },
+        {
+          "name": "08 Get Wallet Transactions",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Wallet transactions returned', () => pm.response.to.have.status(200));"] } }],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/api/wallet/transactions" },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "03 - Buyer-Created Wallet Order",
+      "description": "The authenticated member is the buyer. The guest vendor supplies payout and parcel details. The member selects shipping, pays from wallet, and confirms delivery; Paystack then pays the guest vendor.",
+      "item": [
+        {
+          "name": "01 Create Buyer Order",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Buyer order created', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code === 201) {",
+                  "  const data = pm.response.json();",
+                  "  pm.environment.set('buyerOrderId', data.id);",
+                  "  pm.environment.set('buyerShareToken', data.shareToken);",
+                  "  pm.environment.set('buyerShareableLink', data.shareableLink);",
+                  "  pm.environment.set('activeShareToken', data.shareToken);",
+                  "  pm.environment.set('buyerWalletPaymentKey', pm.variables.replaceIn('{{$guid}}'));",
+                  "  pm.environment.set('buyerDeliveryKey', pm.variables.replaceIn('{{$guid}}'));",
+                  "  pm.environment.set('payoutReference', `shopsecure_order_${data.id}_payout`);",
+                  "  ['buyerCounterpartyChallengeId','buyerCounterpartyOtp','buyerGuestAccessToken','buyerQuoteId','buyerOrderTotal'].forEach(key => pm.environment.unset(key));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": {{buyerOrderAmount}},\n  \"itemDescription\": \"{{buyerItemDescription}}\",\n  \"creatorRole\": \"BUYER\",\n  \"creatorAddress\": {\n    \"line1\": \"20 Admiralty Way\",\n    \"line2\": \"Lekki Phase 1\",\n    \"city\": \"Lagos\",\n    \"state\": \"Lagos\",\n    \"country\": \"NG\",\n    \"postalCode\": \"101233\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/orders",
+            "description": "Buyer-created orders must omit parcel. The response fundingMode should be WALLET."
+          },
+          "response": []
+        },
+        {
+          "name": "02 View Public Order",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Public order returned', () => pm.response.to.have.status(200));"] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "header": [], "url": "{{baseUrl}}/orders/token/{{buyerShareToken}}" },
+          "response": []
+        },
+        {
+          "name": "03 Resolve Guest Vendor Bank",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Guest vendor bank resolved', () => pm.response.to.have.status(200));"] } }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"accountNumber\": \"{{bankAccountNumber}}\",\n  \"bankCode\": \"{{bankCode}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/orders/token/{{buyerShareToken}}/bank-account/resolve"
+          },
+          "response": []
+        },
+        {
+          "name": "04 Submit Guest Vendor Details",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Guest vendor details accepted', () => pm.response.to.have.status(202));",
+                  "if (pm.response.code === 202) pm.environment.set('buyerCounterpartyChallengeId', pm.response.json().challengeId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"{{guestVendorFirstName}}\",\n  \"lastName\": \"{{guestVendorLastName}}\",\n  \"email\": \"{{guestVendorEmail}}\",\n  \"phoneNumber\": \"{{guestVendorPhone}}\",\n  \"address\": {\n    \"line1\": \"12 Marina Road\",\n    \"line2\": \"Suite 4\",\n    \"city\": \"Lagos\",\n    \"state\": \"Lagos\",\n    \"country\": \"NG\",\n    \"postalCode\": \"100221\"\n  },\n  \"externalBankAccount\": {\n    \"accountNumber\": \"{{bankAccountNumber}}\",\n    \"bankCode\": \"{{bankCode}}\"\n  },\n  \"parcel\": {\n    \"weightKg\": 2.000,\n    \"lengthCm\": 40.00,\n    \"widthCm\": 30.00,\n    \"heightCm\": 15.00\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/orders/token/{{buyerShareToken}}/counterparty-info",
+            "description": "The guest vendor must provide both a resolved payout account and parcel details. Paste the delivered OTP into buyerCounterpartyOtp."
+          },
+          "response": []
+        },
+        {
+          "name": "05 Resend Guest Vendor OTP (optional)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Guest vendor OTP resent', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) pm.environment.set('buyerCounterpartyChallengeId', pm.response.json().challengeId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"challengeId\": \"{{buyerCounterpartyChallengeId}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/orders/token/{{buyerShareToken}}/resend-otp"
+          },
+          "response": []
+        },
+        {
+          "name": "06 Verify Guest Vendor OTP",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Guest vendor verified', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('buyerGuestAccessToken', data.guestAccessToken); pm.environment.set('activeShareToken', pm.environment.get('buyerShareToken')); pm.environment.set('activeGuestAccessToken', data.guestAccessToken); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"challengeId\": \"{{buyerCounterpartyChallengeId}}\",\n  \"code\": \"{{buyerCounterpartyOtp}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/orders/token/{{buyerShareToken}}/verify-otp",
+            "description": "Verification also creates the guest vendor's Paystack transfer recipient."
+          },
+          "response": []
+        },
+        {
+          "name": "07 Request Shipping Quotes (member buyer)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Shipping quotes returned', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { const data = pm.response.json(); pm.test('At least one quote is available', () => pm.expect(data.length).to.be.above(0)); if (data.length) pm.environment.set('buyerQuoteId', data[0].quoteId); }"
+                ]
+              }
+            }
+          ],
+          "request": { "method": "POST", "header": [], "url": "{{baseUrl}}/orders/{{buyerOrderId}}/shipping/quotes" },
+          "response": []
+        },
+        {
+          "name": "08 Select Shipping Quote (member buyer)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Shipping quote selected', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { const data = pm.response.json(); if (data.pricing) pm.environment.set('buyerOrderTotal', data.pricing.totalAmount); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quoteId\": {{buyerQuoteId}}\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/orders/{{buyerOrderId}}/shipping/selection"
+          },
+          "response": []
+        },
+        {
+          "name": "09 Pay From Wallet",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["if (!pm.environment.get('buyerWalletPaymentKey')) pm.environment.set('buyerWalletPaymentKey', pm.variables.replaceIn('{{$guid}}'));"]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Wallet payment request processed', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const data = pm.response.json();",
+                  "  pm.environment.set('walletBalance', data.walletBalance);",
+                  "  if (data.shortfall != null) pm.environment.set('walletShortfall', data.shortfall);",
+                  "  if (data.topUpInstructions && data.topUpInstructions.virtualAccount) { pm.environment.set('topUpAccountNumber', data.topUpInstructions.virtualAccount.accountNumber); pm.environment.set('topUpBankName', data.topUpInstructions.virtualAccount.bankName); }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Idempotency-Key", "value": "{{buyerWalletPaymentKey}}", "type": "text" }],
+            "url": "{{baseUrl}}/orders/{{buyerOrderId}}/payments/wallet",
+            "description": "INSUFFICIENT_FUNDS performs no debit. After a DVA top-up is credited, set a new buyerWalletPaymentKey for the new intentional payment attempt and send again."
+          },
+          "response": []
+        },
+        {
+          "name": "10 Get Buyer Order Details",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Buyer order returned', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { const data = pm.response.json(); pm.test('Buyer order includes reusable share link', () => pm.expect(data.shareableLink).to.eql(pm.environment.get('buyerShareableLink'))); if (data.shipping) { pm.environment.set('trackingReference', data.shipping.trackingReference || ''); pm.environment.set('trackingUrl', data.shipping.trackingUrl || ''); const ref = data.shipping.trackingReference || ''; if (ref.startsWith('TRK-MOCK-')) pm.environment.set('stubShipmentId', ref.replace('TRK-MOCK-', 'SHP-MOCK-')); } }"
+                ]
+              }
+            }
+          ],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/orders/{{buyerOrderId}}" },
+          "response": []
+        },
+        {
+          "name": "11 Refresh Buyer Shipment Tracking",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Tracking returned', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('trackingReference', data.trackingReference || ''); pm.environment.set('trackingUrl', data.trackingUrl || ''); const ref = data.trackingReference || ''; if (ref.startsWith('TRK-MOCK-')) pm.environment.set('stubShipmentId', ref.replace('TRK-MOCK-', 'SHP-MOCK-')); }"
+                ]
+              }
+            }
+          ],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/orders/{{buyerOrderId}}/shipping/tracking" },
+          "response": []
+        },
+        {
+          "name": "12 Guest Vendor Status",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Guest vendor status returned', () => pm.response.to.have.status(200));"] } }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [{ "key": "X-Order-Access-Token", "value": "{{buyerGuestAccessToken}}", "type": "text" }],
+            "url": "{{baseUrl}}/orders/token/{{buyerShareToken}}/status"
+          },
+          "response": []
+        },
+        {
+          "name": "13 Confirm Delivery (member buyer)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": { "type": "text/javascript", "exec": ["if (!pm.environment.get('buyerDeliveryKey')) pm.environment.set('buyerDeliveryKey', pm.variables.replaceIn('{{$guid}}'));"] }
+            },
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('Delivery confirmation processed', () => pm.response.to.have.status(200));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{buyerDeliveryKey}}", "type": "text" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"confirmation\": true\n}", "options": { "raw": { "language": "json" } } },
+            "url": "{{baseUrl}}/orders/{{buyerOrderId}}/confirm-delivery",
+            "description": "Initiates payout of itemAmount to the guest vendor. A pending response is normal; poll details or use the controlled payout webhook helper in local/test."
+          },
+          "response": []
+        },
+        {
+          "name": "14 Get Buyer Order History",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Order history returned', () => pm.response.to.have.status(200));"] } }],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/orders/{{buyerOrderId}}/history" },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "04 - Vendor-Created Checkout Order",
+      "description": "The authenticated member is the vendor and supplies parcel details. The verified guest buyer selects shipping, pays through Paystack Checkout, and confirms delivery with an OTP. Settlement credits the member vendor's wallet.",
+      "item": [
+        {
+          "name": "01 Create Vendor Order",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Vendor order created', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code === 201) {",
+                  "  const data = pm.response.json();",
+                  "  pm.environment.set('vendorOrderId', data.id);",
+                  "  pm.environment.set('vendorShareToken', data.shareToken);",
+                  "  pm.environment.set('vendorShareableLink', data.shareableLink);",
+                  "  pm.environment.set('activeShareToken', data.shareToken);",
+                  "  pm.environment.set('guestDeliveryKey', pm.variables.replaceIn('{{$guid}}'));",
+                  "  ['vendorCounterpartyChallengeId','vendorCounterpartyOtp','vendorGuestAccessToken','vendorQuoteId','vendorOrderTotal','checkoutReference','checkoutAuthorizationUrl','checkoutAccessCode','checkoutAmountMinor','deliveryChallengeId','deliveryOtp'].forEach(key => pm.environment.unset(key));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"amount\": {{vendorOrderAmount}},\n  \"itemDescription\": \"{{vendorItemDescription}}\",\n  \"creatorRole\": \"VENDOR\",\n  \"creatorAddress\": {\n    \"line1\": \"12 Marina Road\",\n    \"line2\": \"\",\n    \"city\": \"Lagos\",\n    \"state\": \"Lagos\",\n    \"country\": \"NG\",\n    \"postalCode\": \"100001\"\n  },\n  \"parcel\": {\n    \"weightKg\": 2.500,\n    \"lengthCm\": 40.00,\n    \"widthCm\": 30.00,\n    \"heightCm\": 15.00\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/orders",
+            "description": "Vendor-created orders require parcel and use PAYSTACK_CHECKOUT funding."
+          },
+          "response": []
+        },
+        {
+          "name": "02 View Public Order",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Public order returned', () => pm.response.to.have.status(200));"] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "header": [], "url": "{{baseUrl}}/orders/token/{{vendorShareToken}}" },
+          "response": []
+        },
+        {
+          "name": "03 Submit Guest Buyer Details",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Guest buyer details accepted', () => pm.response.to.have.status(202));",
+                  "if (pm.response.code === 202) pm.environment.set('vendorCounterpartyChallengeId', pm.response.json().challengeId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"{{guestBuyerFirstName}}\",\n  \"lastName\": \"{{guestBuyerLastName}}\",\n  \"email\": \"{{guestBuyerEmail}}\",\n  \"phoneNumber\": \"{{guestBuyerPhone}}\",\n  \"address\": {\n    \"line1\": \"8 Broad Street\",\n    \"line2\": \"\",\n    \"city\": \"Lagos\",\n    \"state\": \"Lagos\",\n    \"country\": \"NG\",\n    \"postalCode\": \"100001\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/orders/token/{{vendorShareToken}}/counterparty-info",
+            "description": "Guest buyers must omit externalBankAccount and parcel. Paste the delivered OTP into vendorCounterpartyOtp."
+          },
+          "response": []
+        },
+        {
+          "name": "04 Resend Guest Buyer OTP (optional)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Guest buyer OTP resent', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) pm.environment.set('vendorCounterpartyChallengeId', pm.response.json().challengeId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"challengeId\": \"{{vendorCounterpartyChallengeId}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": "{{baseUrl}}/orders/token/{{vendorShareToken}}/resend-otp"
+          },
+          "response": []
+        },
+        {
+          "name": "05 Verify Guest Buyer OTP",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Guest buyer verified', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('vendorGuestAccessToken', data.guestAccessToken); pm.environment.set('activeShareToken', pm.environment.get('vendorShareToken')); pm.environment.set('activeGuestAccessToken', data.guestAccessToken); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"challengeId\": \"{{vendorCounterpartyChallengeId}}\",\n  \"code\": \"{{vendorCounterpartyOtp}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/orders/token/{{vendorShareToken}}/verify-otp"
+          },
+          "response": []
+        },
+        {
+          "name": "06 Request Shipping Quotes (guest buyer)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Shipping quotes returned', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { const data = pm.response.json(); pm.test('At least one quote is available', () => pm.expect(data.length).to.be.above(0)); if (data.length) pm.environment.set('vendorQuoteId', data[0].quoteId); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "X-Order-Access-Token", "value": "{{vendorGuestAccessToken}}", "type": "text" }],
+            "url": "{{baseUrl}}/orders/token/{{vendorShareToken}}/shipping/quotes"
+          },
+          "response": []
+        },
+        {
+          "name": "07 Select Shipping Quote (guest buyer)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Shipping quote selected', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { const data = pm.response.json(); if (data.pricing) pm.environment.set('vendorOrderTotal', data.pricing.totalAmount); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Order-Access-Token", "value": "{{vendorGuestAccessToken}}", "type": "text" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"quoteId\": {{vendorQuoteId}}\n}", "options": { "raw": { "language": "json" } } },
+            "url": "{{baseUrl}}/orders/token/{{vendorShareToken}}/shipping/selection"
+          },
+          "response": []
+        },
+        {
+          "name": "08 Initialize Paystack Checkout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Checkout initialized or replayed', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) {",
+                  "  const data = pm.response.json();",
+                  "  pm.environment.set('checkoutReference', data.reference);",
+                  "  pm.environment.set('checkoutAuthorizationUrl', data.authorizationUrl);",
+                  "  pm.environment.set('checkoutAccessCode', data.accessCode);",
+                  "  if (data.amount != null) pm.environment.set('checkoutAmountMinor', Math.round(Number(data.amount) * 100));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "X-Order-Access-Token", "value": "{{vendorGuestAccessToken}}", "type": "text" }],
+            "url": "{{baseUrl}}/orders/token/{{vendorShareToken}}/payments/checkout",
+            "description": "Open checkoutAuthorizationUrl and complete payment. A browser callback is not payment proof; poll status until the backend verifies payment."
+          },
+          "response": []
+        },
+        {
+          "name": "09 Poll Guest Buyer Status",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Guest buyer status returned', () => pm.response.to.have.status(200));"] } }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [{ "key": "X-Order-Access-Token", "value": "{{vendorGuestAccessToken}}", "type": "text" }],
+            "url": "{{baseUrl}}/orders/token/{{vendorShareToken}}/status"
+          },
+          "response": []
+        },
+        {
+          "name": "10 Refresh Vendor Order Tracking (member vendor)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Tracking returned', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('trackingReference', data.trackingReference || ''); pm.environment.set('trackingUrl', data.trackingUrl || ''); const ref = data.trackingReference || ''; if (ref.startsWith('TRK-MOCK-')) pm.environment.set('stubShipmentId', ref.replace('TRK-MOCK-', 'SHP-MOCK-')); }"
+                ]
+              }
+            }
+          ],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/orders/{{vendorOrderId}}/shipping/tracking" },
+          "response": []
+        },
+        {
+          "name": "11 Request Delivery OTP (guest buyer)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Delivery OTP requested', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) pm.environment.set('deliveryChallengeId', pm.response.json().challengeId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "X-Order-Access-Token", "value": "{{vendorGuestAccessToken}}", "type": "text" }],
+            "url": "{{baseUrl}}/orders/token/{{vendorShareToken}}/delivery-otp",
+            "description": "The order must be READY_FOR_DELIVERY. Paste the delivered code into deliveryOtp."
+          },
+          "response": []
+        },
+        {
+          "name": "12 Confirm Delivery (guest buyer)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": { "type": "text/javascript", "exec": ["if (!pm.environment.get('guestDeliveryKey')) pm.environment.set('guestDeliveryKey', pm.variables.replaceIn('{{$guid}}'));"] }
+            },
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('Guest delivery confirmed', () => pm.response.to.have.status(200));"] }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Order-Access-Token", "value": "{{vendorGuestAccessToken}}", "type": "text" },
+              { "key": "Idempotency-Key", "value": "{{guestDeliveryKey}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"challengeId\": \"{{deliveryChallengeId}}\",\n  \"code\": \"{{deliveryOtp}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/orders/token/{{vendorShareToken}}/confirm-delivery",
+            "description": "Credits itemAmount to the registered vendor wallet exactly once."
+          },
+          "response": []
+        },
+        {
+          "name": "13 Get Vendor Order Details (member vendor)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Vendor order returned', () => pm.response.to.have.status(200));", "if (pm.response.code === 200) { const data = pm.response.json(); pm.test('Vendor order includes reusable share link', () => pm.expect(data.shareableLink).to.eql(pm.environment.get('vendorShareableLink'))); }"] } }],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/orders/{{vendorOrderId}}" },
+          "response": []
+        },
+        {
+          "name": "14 Get Vendor Order History",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Order history returned', () => pm.response.to.have.status(200));"] } }],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/orders/{{vendorOrderId}}/history" },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "05 - Order and Guest Utilities",
+      "description": "General list, access recovery, and cancellation requests. Set activeShareToken and activeGuestAccessToken by running either workflow's OTP verification request.",
+      "item": [
+        {
+          "name": "01 List My Orders",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Orders returned', () => pm.response.to.have.status(200));", "if (pm.response.code === 200) { const data = pm.response.json(); pm.test('Creator orders include reusable share links', () => { pm.expect(data.content).to.be.an('array'); data.content.forEach(order => { pm.expect(order.shareableLink).to.be.a('string'); pm.expect(order.shareableLink.length).to.be.above(0); }); }); }"] } }],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/orders",
+            "description": "Returns creator-owned orders newest first. Every content item includes shareableLink so the creator can copy the order link again."
+          },
+          "response": []
+        },
+        {
+          "name": "02 View Active Public Order",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Public order returned', () => pm.response.to.have.status(200));"] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "header": [], "url": "{{baseUrl}}/orders/token/{{activeShareToken}}" },
+          "response": []
+        },
+        {
+          "name": "03 Get Active Guest Status",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Guest status returned', () => pm.response.to.have.status(200));"] } }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [{ "key": "X-Order-Access-Token", "value": "{{activeGuestAccessToken}}", "type": "text" }],
+            "url": "{{baseUrl}}/orders/token/{{activeShareToken}}/status"
+          },
+          "response": []
+        },
+        {
+          "name": "04 Request Guest Access Recovery OTP",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Access recovery OTP requested', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) pm.environment.set('accessRecoveryChallengeId', pm.response.json().challengeId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/orders/token/{{activeShareToken}}/access-recovery-otp",
+            "description": "No previous guest token is required. Paste the code into accessRecoveryOtp."
+          },
+          "response": []
+        },
+        {
+          "name": "05 Recover Guest Access",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Guest access recovered', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) pm.environment.set('activeGuestAccessToken', pm.response.json().guestAccessToken);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"challengeId\": \"{{accessRecoveryChallengeId}}\",\n  \"code\": \"{{accessRecoveryOtp}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/orders/token/{{activeShareToken}}/recover-access",
+            "description": "Saves the replacement token as activeGuestAccessToken and revokes older active guest tokens."
+          },
+          "response": []
+        },
+        {
+          "name": "06 Cancel Buyer Order Before Payment (alternative path)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Cancellation request processed', () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));"] } }],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/orders/{{buyerOrderId}}/shipping/cancel",
+            "description": "Do not run during the main flow. Cancellation is available only before confirmed payment and may return an empty body when no shipment exists."
+          },
+          "response": []
+        },
+        {
+          "name": "07 Cancel Vendor Order Before Checkout (alternative path)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Cancellation request processed', () => pm.expect(pm.response.code).to.be.oneOf([200, 204]));"] } }],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/orders/{{vendorOrderId}}/shipping/cancel",
+            "description": "Do not run during the main flow. Once a Checkout URL has been initialized, cancellation requires manual review and this request is rejected."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "06 - Signed Webhook Helpers (local/test only)",
+      "description": "Synthetic provider callbacks for a controlled local or test backend. Scripts calculate signatures over the exact rendered body. Never use these requests against production.",
+      "item": [
+        {
+          "name": "01 Paystack DVA Wallet Top-Up Success",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const CryptoJS = pm.require('npm:crypto-js@4.2.0');",
+                  "const secret = pm.environment.get('paystackWebhookSecret');",
+                  "if (!secret) throw new Error('Set paystackWebhookSecret to the backend test Paystack key');",
+                  "pm.environment.set('paystackEventId', `postman_topup_${pm.variables.replaceIn('{{$guid}}')}`);",
+                  "pm.environment.set('walletTopUpReference', `postman_topup_${pm.variables.replaceIn('{{$guid}}')}`);",
+                  "pm.environment.set('webhookOccurredAt', new Date().toISOString());",
+                  "const body = pm.variables.replaceIn(pm.request.body.raw);",
+                  "pm.request.headers.upsert({ key: 'X-Paystack-Signature', value: CryptoJS.HmacSHA512(body, secret).toString(CryptoJS.enc.Hex) });"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('Paystack webhook accepted', () => pm.response.to.have.status(200));"] }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"event\":\"charge.success\",\"data\":{\"id\":\"{{paystackEventId}}\",\"reference\":\"{{walletTopUpReference}}\",\"amount\":{{walletTopUpAmountMinor}},\"currency\":\"NGN\",\"channel\":\"dedicated_nuban\",\"paid_at\":\"{{webhookOccurredAt}}\",\"authorization\":{\"receiver_bank_account_number\":\"{{virtualAccountNumber}}\"}}}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/webhooks/paystack",
+            "description": "Credits walletTopUpAmountMinor/100 to the wallet owning virtualAccountNumber. Run Get Wallet afterward, create a new buyerWalletPaymentKey, then retry wallet payment."
+          },
+          "response": []
+        },
+        {
+          "name": "02 Paystack Checkout Success",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const CryptoJS = pm.require('npm:crypto-js@4.2.0');",
+                  "const secret = pm.environment.get('paystackWebhookSecret');",
+                  "if (!secret) throw new Error('Set paystackWebhookSecret to the backend test Paystack key');",
+                  "if (!pm.environment.get('checkoutReference') || !pm.environment.get('checkoutAmountMinor')) throw new Error('Initialize Checkout first');",
+                  "pm.environment.set('paystackEventId', `postman_checkout_${pm.variables.replaceIn('{{$guid}}')}`);",
+                  "pm.environment.set('webhookOccurredAt', new Date().toISOString());",
+                  "const body = pm.variables.replaceIn(pm.request.body.raw);",
+                  "pm.request.headers.upsert({ key: 'X-Paystack-Signature', value: CryptoJS.HmacSHA512(body, secret).toString(CryptoJS.enc.Hex) });"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('Paystack webhook accepted', () => pm.response.to.have.status(200));"] }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"event\":\"charge.success\",\"data\":{\"id\":\"{{paystackEventId}}\",\"reference\":\"{{checkoutReference}}\",\"amount\":{{checkoutAmountMinor}},\"currency\":\"NGN\",\"channel\":\"card\",\"paid_at\":\"{{webhookOccurredAt}}\"}}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/webhooks/paystack",
+            "description": "Marks the persisted checkout attempt paid only when reference, exact amount, and currency match."
+          },
+          "response": []
+        },
+        {
+          "name": "03 Paystack Vendor Payout Success",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const CryptoJS = pm.require('npm:crypto-js@4.2.0');",
+                  "const secret = pm.environment.get('paystackWebhookSecret');",
+                  "if (!secret) throw new Error('Set paystackWebhookSecret to the backend test Paystack key');",
+                  "if (!pm.environment.get('payoutReference')) throw new Error('Create, fund, and carrier-pickup an order first');",
+                  "pm.environment.set('webhookOccurredAt', new Date().toISOString());",
+                  "const body = pm.variables.replaceIn(pm.request.body.raw);",
+                  "pm.request.headers.upsert({ key: 'X-Paystack-Signature', value: CryptoJS.HmacSHA512(body, secret).toString(CryptoJS.enc.Hex) });"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('Paystack payout webhook accepted', () => pm.response.to.have.status(200));"] }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"event\":\"transfer.success\",\"data\":{\"reference\":\"{{payoutReference}}\",\"transferred_at\":\"{{webhookOccurredAt}}\"}}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/webhooks/paystack",
+            "description": "Completes the initial deterministic payout reference. If automated reconciliation created a retry reference, update payoutReference before sending."
+          },
+          "response": []
+        },
+        {
+          "name": "04 Local Stub Shipment Delivered",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const CryptoJS = pm.require('npm:crypto-js@4.2.0');",
+                  "const secret = pm.environment.get('stubShippingWebhookSecret');",
+                  "if (!secret) throw new Error('Set stubShippingWebhookSecret');",
+                  "if (!pm.environment.get('stubShipmentId')) throw new Error('Refresh tracking first so stubShipmentId can be derived');",
+                  "pm.environment.set('webhookOccurredAt', new Date().toISOString());",
+                  "const body = pm.variables.replaceIn(pm.request.body.raw);",
+                  "pm.request.headers.upsert({ key: 'x-shipping-signature', value: CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex) });"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('Stub shipping webhook accepted', () => pm.response.to.have.status(200));"] }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"eventType\":\"shipment.status.updated\",\"shipmentId\":\"{{stubShipmentId}}\",\"status\":\"delivered\",\"occurredAt\":\"{{webhookOccurredAt}}\"}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/webhooks/terminal",
+            "description": "For application-local with Terminal disabled. The endpoint delegates to StubShippingProvider and expects HMAC-SHA256 in x-shipping-signature."
+          },
+          "response": []
+        },
+        {
+          "name": "05 Terminal Africa Shipment Delivered",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const CryptoJS = pm.require('npm:crypto-js@4.2.0');",
+                  "const secret = pm.environment.get('terminalWebhookSecret');",
+                  "if (!secret) throw new Error('Set terminalWebhookSecret');",
+                  "if (!pm.environment.get('terminalShipmentId')) throw new Error('Set terminalShipmentId from the provider dashboard/logs');",
+                  "pm.environment.set('webhookOccurredAt', new Date().toISOString());",
+                  "const body = pm.variables.replaceIn(pm.request.body.raw);",
+                  "pm.request.headers.upsert({ key: 'X-Terminal-Signature', value: CryptoJS.HmacSHA512(body, secret).toString(CryptoJS.enc.Hex) });"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('Terminal webhook accepted', () => pm.response.to.have.status(200));"] }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\"event\":\"shipment.delivered\",\"data\":{\"shipment_id\":\"{{terminalShipmentId}}\",\"status\":\"delivered\",\"updated_at\":\"{{webhookOccurredAt}}\"}}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/webhooks/terminal",
+            "description": "For the TerminalAfricaShippingProvider only. Uses HMAC-SHA512 in X-Terminal-Signature."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "07 - Waybill Creator",
+      "description": "Authenticated waybill creation and creator-owned reads/mutations. Invited-payer creation contains only sender pickup details; the verified recipient controls quotes and checkout. Creator-paid creation includes both parties, and the creator controls quotes and checkout.",
+      "item": [
+        {
+          "name": "01 Create Invitation Waybill",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.variables.get('waybillCreationKey')) pm.environment.set('waybillCreationKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Waybill created', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code === 201) {",
+                  "  const data = pm.response.json();",
+                  "  pm.environment.set('waybillPublicId', data.details.publicId);",
+                  "  if (data.invitationLink) {",
+                  "    pm.environment.set('waybillInvitationLink', data.invitationLink);",
+                  "    const segments = data.invitationLink.split('/').filter(Boolean);",
+                  "    pm.environment.set('waybillInvitationToken', segments[segments.length - 1]);",
+                  "  }",
+                  "  ['waybillOtpChallengeId','waybillOtp','waybillAccessToken','waybillRecoveryChallengeId','waybillRecoveryOtp','waybillQuoteId','waybillCheckoutReference'].forEach(key => pm.environment.unset(key));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{waybillCreationKey}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"creatorRole\": \"SENDER\",\n  \"payerType\": \"INVITED_PAYER\",\n  \"description\": \"{{waybillDescription}}\",\n  \"declaredValue\": {{waybillDeclaredValue}},\n  \"creatorAddress\": {\n    \"line1\": \"1 Marina Road\",\n    \"line2\": null,\n    \"city\": \"Lagos\",\n    \"state\": \"Lagos\",\n    \"country\": \"NG\",\n    \"postalCode\": \"100001\"\n  },\n  \"parcel\": {\n    \"weightKg\": 2.500,\n    \"lengthCm\": 40.00,\n    \"widthCm\": 30.00,\n    \"heightCm\": 15.00\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/waybills",
+            "description": "Creates PARTY_COMPLETION access for the missing RECIPIENT and lets that verified invitee pay. Reusing the same key/body returns 201 with replayed=true and no invitationLink."
+          },
+          "response": []
+        },
+        {
+          "name": "02 Create Creator-Paid Waybill (alternative)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.variables.get('creatorPayWaybillCreationKey')) pm.environment.set('creatorPayWaybillCreationKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Creator-paid waybill created', () => pm.response.to.have.status(201));",
+                  "if (pm.response.code === 201) { const data = pm.response.json(); pm.environment.set('creatorPayWaybillPublicId', data.details.publicId); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{creatorPayWaybillCreationKey}}", "type": "text" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"creatorRole\": \"SENDER\",\n  \"payerType\": \"CREATOR\",\n  \"description\": \"{{waybillDescription}}\",\n  \"declaredValue\": {{waybillDeclaredValue}},\n  \"creatorAddress\": {\n    \"line1\": \"1 Marina Road\",\n    \"line2\": null,\n    \"city\": \"Lagos\",\n    \"state\": \"Lagos\",\n    \"country\": \"NG\",\n    \"postalCode\": \"100001\"\n  },\n  \"parcel\": {\n    \"weightKg\": 2.500,\n    \"lengthCm\": 40.00,\n    \"widthCm\": 30.00,\n    \"heightCm\": 15.00\n  },\n  \"oppositeParty\": {\n    \"firstName\": \"{{waybillPartyFirstName}}\",\n    \"lastName\": \"{{waybillPartyLastName}}\",\n    \"email\": \"{{waybillPartyEmail}}\",\n    \"phoneNumber\": \"{{waybillPartyPhone}}\",\n    \"address\": {\n      \"line1\": \"2 Receiver Road\",\n      \"line2\": null,\n      \"city\": \"Abuja\",\n      \"state\": \"FCT\",\n      \"country\": \"NG\",\n      \"postalCode\": \"900001\"\n    }\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/waybills",
+            "description": "Alternative combination: both parties exist immediately, payerType is CREATOR, initial status is AWAITING_QUOTE, and no invitation is issued."
+          },
+          "response": []
+        },
+        {
+          "name": "03 List My Waybills",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Creator waybill page returned', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { const data = pm.response.json(); pm.test('Page envelope is present', () => { pm.expect(data.content).to.be.an('array'); pm.expect(data.page).to.be.a('number'); pm.expect(data.size).to.be.a('number'); }); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/waybills?page={{page}}&size={{pageSize}}",
+            "description": "Zero-based creator-owned page, sorted by createdAt then id descending."
+          },
+          "response": []
+        },
+        {
+          "name": "04 Get Waybill Details",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Waybill details returned', () => pm.response.to.have.status(200));"] } }],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/waybills/{{waybillPublicId}}" },
+          "response": []
+        },
+        {
+          "name": "05 Get Waybill History",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Waybill history returned', () => pm.response.to.have.status(200));"] } }],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/waybills/{{waybillPublicId}}/history", "description": "Bare array ordered oldest first." },
+          "response": []
+        },
+        {
+          "name": "06 Reissue Waybill Invitation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Waybill invitation reissued', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('waybillInvitationLink', data.invitationLink); const segments = data.invitationLink.split('/').filter(Boolean); pm.environment.set('waybillInvitationToken', segments[segments.length - 1]); pm.environment.unset('waybillAccessToken'); }",
+                  "pm.test('Sensitive response is not cacheable', () => { pm.expect(pm.response.headers.get('Cache-Control')).to.eql('no-store'); pm.expect(pm.response.headers.get('Pragma')).to.eql('no-cache'); pm.expect(pm.response.headers.get('Referrer-Policy')).to.eql('no-referrer'); });"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/waybills/{{waybillPublicId}}/invitations/reissue",
+            "description": "Revokes the prior recipient invitation/access token and captures one replacement PARTY_COMPLETION link. Valid only while the waybill is still AWAITING_PARTY_DETAILS."
+          },
+          "response": []
+        },
+        {
+          "name": "07 Request Creator-Paid Waybill Quotes",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Creator-paid quotes returned', () => pm.response.to.have.status(200));", "if (pm.response.code === 200) { const data = pm.response.json(); if (data.length) pm.environment.set('creatorPayWaybillQuoteId', data[0].quoteId); }"] } }],
+          "request": { "method": "POST", "header": [], "url": "{{baseUrl}}/waybills/{{creatorPayWaybillPublicId}}/shipping/quotes" },
+          "response": []
+        },
+        {
+          "name": "08 Select Creator-Paid Waybill Quote",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Creator-paid quote selected', () => pm.response.to.have.status(200));"] } }],
+          "request": {
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"quoteId\": {{creatorPayWaybillQuoteId}}\n}", "options": { "raw": { "language": "json" } } },
+            "url": "{{baseUrl}}/waybills/{{creatorPayWaybillPublicId}}/shipping/selection"
+          },
+          "response": []
+        },
+        {
+          "name": "09 Initialize Creator Waybill Checkout",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["if (!pm.variables.get('creatorPayWaybillCheckoutKey')) pm.environment.set('creatorPayWaybillCheckoutKey', pm.variables.replaceIn('{{$guid}}'));"] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Creator waybill checkout initialized or replayed', () => pm.response.to.have.status(200));", "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('creatorPayWaybillCheckoutReference', data.reference); pm.environment.set('creatorPayWaybillAuthorizationUrl', data.authorizationUrl || ''); }"] } }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Idempotency-Key", "value": "{{creatorPayWaybillCheckoutKey}}", "type": "text" }],
+            "url": "{{baseUrl}}/waybills/{{creatorPayWaybillPublicId}}/payments/checkout",
+            "description": "No body. Valid only for payerType CREATOR. Reuse this key while the attempt is open."
+          },
+          "response": []
+        },
+        {
+          "name": "10 Refresh Waybill Tracking",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Waybill tracking returned', () => pm.response.to.have.status(200));", "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('waybillProviderShipmentId', data.providerShipmentId || ''); pm.environment.set('waybillTrackingReference', data.trackingReference || ''); }"] } }],
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/waybills/{{waybillPublicId}}/shipping/tracking", "description": "Creator-only live provider refresh. The shipment must already exist." },
+          "response": []
+        },
+        {
+          "name": "11 Cancel Waybill (alternative path)",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["if (!pm.variables.get('waybillCancellationKey')) pm.environment.set('waybillCancellationKey', pm.variables.replaceIn('{{$guid}}'));"] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Waybill cancellation processed', () => pm.response.to.have.status(200));"] } }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{waybillCancellationKey}}", "type": "text" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"{{waybillCancellationReason}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": "{{baseUrl}}/waybills/{{waybillPublicId}}/cancel",
+            "description": "Alternative terminal path. Reuse the same key and reason; persisted scheduler/backoff handles due carrier retries and full captured-payment refunds."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "08 - Waybill Public Invitation",
+      "description": "Recipient onboarding, OTP verification, quote selection, and invited checkout. Select no authentication for every request and use the invitation-scoped access token after OTP verification.",
+      "item": [
+        {
+          "name": "01 View Public Waybill Invitation",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Public waybill invitation returned', () => pm.response.to.have.status(200));", "pm.test('Invitation response is private', () => { pm.expect(pm.response.headers.get('Cache-Control')).to.eql('no-store'); pm.expect(pm.response.headers.get('Pragma')).to.eql('no-cache'); pm.expect(pm.response.headers.get('Referrer-Policy')).to.eql('no-referrer'); });"] } }],
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "header": [], "url": "{{baseUrl}}/waybills/invitations/{{waybillInvitationToken}}" },
+          "response": []
+        },
+        {
+          "name": "02 Submit Waybill Party Details",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Waybill party details accepted', () => pm.response.to.have.status(202));", "if (pm.response.code === 202) pm.environment.set('waybillOtpChallengeId', pm.response.json().challengeId);"] } }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"firstName\": \"{{waybillPartyFirstName}}\",\n  \"lastName\": \"{{waybillPartyLastName}}\",\n  \"email\": \"{{waybillPartyEmail}}\",\n  \"phoneNumber\": \"{{waybillPartyPhone}}\",\n  \"address\": {\n    \"line1\": \"2 Receiver Road\",\n    \"line2\": null,\n    \"city\": \"Abuja\",\n    \"state\": \"FCT\",\n    \"country\": \"NG\",\n    \"postalCode\": \"900001\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/waybills/invitations/{{waybillInvitationToken}}/party-details",
+            "description": "PARTY_COMPLETION only. Sends one code to the same normalized phone and email. Paste it into waybillOtp."
+          },
+          "response": []
+        },
+        {
+          "name": "03 Resend Waybill OTP (optional)",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Waybill OTP resent', () => pm.response.to.have.status(200));", "if (pm.response.code === 200) pm.environment.set('waybillOtpChallengeId', pm.response.json().challengeId);"] } }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"challengeId\": \"{{waybillOtpChallengeId}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": "{{baseUrl}}/waybills/invitations/{{waybillInvitationToken}}/resend-otp",
+            "description": "Wait at least 60 seconds. Replace waybillOtp with the newly delivered code."
+          },
+          "response": []
+        },
+        {
+          "name": "04 Verify Waybill OTP",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Waybill invitation verified', () => pm.response.to.have.status(200));", "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('waybillAccessToken', data.accessToken); pm.environment.set('waybillPublicId', data.waybillPublicId); }"] } }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"challengeId\": \"{{waybillOtpChallengeId}}\",\n  \"code\": \"{{waybillOtp}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": "{{baseUrl}}/waybills/invitations/{{waybillInvitationToken}}/verify-otp",
+            "description": "Captures the one-time plaintext accessToken. PARTY_COMPLETION moves the root to AWAITING_QUOTE."
+          },
+          "response": []
+        },
+        {
+          "name": "05 Get Verified Waybill Status",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Verified waybill status returned', () => pm.response.to.have.status(200));", "if (pm.response.code === 200) pm.test('Status never reissues plaintext access', () => pm.expect(pm.response.json().accessToken).to.eql(null));"] } }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [{ "key": "X-Waybill-Access-Token", "value": "{{waybillAccessToken}}", "type": "text" }],
+            "url": "{{baseUrl}}/waybills/invitations/{{waybillInvitationToken}}/status"
+          },
+          "response": []
+        },
+        {
+          "name": "06 Request Recipient Shipping Quotes",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Recipient waybill quotes returned', () => pm.response.to.have.status(200));", "pm.test('Invitation quote response is private', () => { pm.expect(pm.response.headers.get('Cache-Control')).to.eql('no-store'); pm.expect(pm.response.headers.get('Pragma')).to.eql('no-cache'); pm.expect(pm.response.headers.get('Referrer-Policy')).to.eql('no-referrer'); });", "if (pm.response.code === 200) { const data = pm.response.json(); pm.test('At least one waybill quote is available', () => pm.expect(data.length).to.be.above(0)); if (data.length) { pm.environment.set('waybillQuoteId', data[0].quoteId); pm.environment.set('waybillQuoteExpiresAt', data[0].expiresAt); } }"] } }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "X-Waybill-Access-Token", "value": "{{waybillAccessToken}}", "type": "text" }],
+            "url": "{{baseUrl}}/waybills/invitations/{{waybillInvitationToken}}/shipping/quotes",
+            "description": "Requires the active verified recipient PARTY_COMPLETION invitation with canPay=true and completed recipient details. Reuses cached unexpired rates."
+          },
+          "response": []
+        },
+        {
+          "name": "07 Select Recipient Shipping Quote",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Recipient waybill quote selected', () => pm.response.to.have.status(200));", "pm.test('Invitation selection response is private', () => { pm.expect(pm.response.headers.get('Cache-Control')).to.eql('no-store'); pm.expect(pm.response.headers.get('Pragma')).to.eql('no-cache'); pm.expect(pm.response.headers.get('Referrer-Policy')).to.eql('no-referrer'); });", "if (pm.response.code === 200) pm.environment.set('waybillTotalAmount', pm.response.json().totalAmount);"] } }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Waybill-Access-Token", "value": "{{waybillAccessToken}}", "type": "text" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"quoteId\": {{waybillQuoteId}}\n}", "options": { "raw": { "language": "json" } } },
+            "url": "{{baseUrl}}/waybills/invitations/{{waybillInvitationToken}}/shipping/selection",
+            "description": "Freezes pricing, sets paymentDueAt, and moves the waybill to AWAITING_PAYMENT/PENDING. Repeating the same selected quote is idempotent only while the quote and payment window remain unexpired."
+          },
+          "response": []
+        },
+        {
+          "name": "08 Request Waybill Access Recovery",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Waybill access recovery accepted', () => pm.response.to.have.status(202));", "if (pm.response.code === 202) pm.environment.set('waybillRecoveryChallengeId', pm.response.json().challengeId);"] } }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [],
+            "url": "{{baseUrl}}/waybills/invitations/{{waybillInvitationToken}}/access-recovery",
+            "description": "No old access token or body is required, but the raw invitation must still be active and previously verified. Paste the code into waybillRecoveryOtp."
+          },
+          "response": []
+        },
+        {
+          "name": "09 Verify Waybill Access Recovery",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Waybill access recovered', () => pm.response.to.have.status(200));", "if (pm.response.code === 200) pm.environment.set('waybillAccessToken', pm.response.json().accessToken);"] } }],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"challengeId\": \"{{waybillRecoveryChallengeId}}\",\n  \"code\": \"{{waybillRecoveryOtp}}\"\n}", "options": { "raw": { "language": "json" } } },
+            "url": "{{baseUrl}}/waybills/invitations/{{waybillInvitationToken}}/access-recovery/verify",
+            "description": "Captures the replacement access token and immediately revokes the old one."
+          },
+          "response": []
+        },
+        {
+          "name": "10 Initialize Invited-Payer Checkout",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["if (!pm.variables.get('waybillCheckoutKey')) pm.environment.set('waybillCheckoutKey', pm.variables.replaceIn('{{$guid}}'));"] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Invited waybill checkout initialized or replayed', () => pm.response.to.have.status(200));", "if (pm.response.code === 200) { const data = pm.response.json(); pm.environment.set('waybillCheckoutReference', data.reference); pm.environment.set('waybillAuthorizationUrl', data.authorizationUrl || ''); pm.environment.set('waybillCheckoutAccessCode', data.accessCode || ''); pm.environment.set('waybillCheckoutAmountMinor', Math.round(Number(data.amount) * 100)); }"] } }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [
+              { "key": "X-Waybill-Access-Token", "value": "{{waybillAccessToken}}", "type": "text" },
+              { "key": "Idempotency-Key", "value": "{{waybillCheckoutKey}}", "type": "text" }
+            ],
+            "url": "{{baseUrl}}/waybills/invitations/{{waybillInvitationToken}}/payments/checkout",
+            "description": "Run after the verified recipient selects a quote. No body. Reuse this key while the attempt is open; authorizationUrl/accessCode can be null for INITIALIZATION_UNKNOWN. After matched funding, refresh status because invited payment access is closed."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "09 - Waybill Admin",
+      "description": "Read-only V14 waybill operations. Set adminJwt from a verified ADMIN login. The numeric adminWaybillId is captured from the list and is not the public UUID.",
+      "item": [
+        {
+          "name": "01 List Admin Waybills",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Admin waybill page returned', () => pm.response.to.have.status(200));", "pm.test('Admin response is not cacheable', () => { pm.expect(pm.response.headers.get('Cache-Control')).to.eql('no-store'); pm.expect(pm.response.headers.get('Pragma')).to.eql('no-cache'); });", "if (pm.response.code === 200) { const data = pm.response.json(); if (data.content && data.content.length) { pm.environment.set('adminWaybillId', data.content[0].id); pm.environment.set('adminWaybillCreatorId', data.content[0].creatorId); } }"] } }],
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminJwt}}", "type": "string" }] },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/waybills?page={{page}}&size={{pageSize}}",
+            "description": "Zero-based, numeric ID descending page. Optional filters are creatorId, status, and paymentStatus."
+          },
+          "response": []
+        },
+        {
+          "name": "02 List Filtered Admin Waybills",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Filtered admin waybill page returned', () => pm.response.to.have.status(200));"] } }],
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminJwt}}", "type": "string" }] },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/waybills?creatorId={{adminWaybillCreatorId}}&status={{adminWaybillStatus}}&paymentStatus={{adminWaybillPaymentStatus}}&page={{page}}&size={{pageSize}}",
+            "description": "Filters are combined with AND. Omit a filter rather than setting it to an empty string."
+          },
+          "response": []
+        },
+        {
+          "name": "03 Get Admin Waybill Detail",
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Admin waybill detail returned', () => pm.response.to.have.status(200));", "pm.test('Admin detail is not cacheable', () => pm.expect(pm.response.headers.get('Cache-Control')).to.eql('no-store'));"] } }],
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{adminJwt}}", "type": "string" }] },
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/api/admin/waybills/{{adminWaybillId}}",
+            "description": "Returns the exact nested admin waybill DTO. Each operational collection is newest first and capped at 100; parties are role-ordered."
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080", "type": "string" },
+    { "key": "page", "value": "0", "type": "string" },
+    { "key": "pageSize", "value": "20", "type": "string" },
+    { "key": "waybillDescription", "value": "Two sealed document boxes", "type": "string" },
+    { "key": "waybillDeclaredValue", "value": "25000.00", "type": "string" },
+    { "key": "waybillCreationKey", "value": "", "type": "string" },
+    { "key": "waybillPublicId", "value": "", "type": "string" },
+    { "key": "waybillInvitationLink", "value": "", "type": "string" },
+    { "key": "waybillInvitationToken", "value": "", "type": "string" },
+    { "key": "waybillPartyFirstName", "value": "Tobi", "type": "string" },
+    { "key": "waybillPartyLastName", "value": "Adebayo", "type": "string" },
+    { "key": "waybillPartyEmail", "value": "tobi@example.com", "type": "string" },
+    { "key": "waybillPartyPhone", "value": "+2348022222222", "type": "string" },
+    { "key": "waybillOtpChallengeId", "value": "", "type": "string" },
+    { "key": "waybillOtp", "value": "", "type": "string" },
+    { "key": "waybillAccessToken", "value": "", "type": "string" },
+    { "key": "waybillRecoveryChallengeId", "value": "", "type": "string" },
+    { "key": "waybillRecoveryOtp", "value": "", "type": "string" },
+    { "key": "waybillQuoteId", "value": "", "type": "string" },
+    { "key": "waybillQuoteExpiresAt", "value": "", "type": "string" },
+    { "key": "waybillTotalAmount", "value": "", "type": "string" },
+    { "key": "waybillCheckoutKey", "value": "", "type": "string" },
+    { "key": "waybillCheckoutReference", "value": "", "type": "string" },
+    { "key": "waybillAuthorizationUrl", "value": "", "type": "string" },
+    { "key": "waybillCheckoutAccessCode", "value": "", "type": "string" },
+    { "key": "waybillCheckoutAmountMinor", "value": "", "type": "string" },
+    { "key": "waybillProviderShipmentId", "value": "", "type": "string" },
+    { "key": "waybillTrackingReference", "value": "", "type": "string" },
+    { "key": "waybillCancellationKey", "value": "", "type": "string" },
+    { "key": "waybillCancellationReason", "value": "Delivery no longer required", "type": "string" },
+    { "key": "creatorPayWaybillCreationKey", "value": "", "type": "string" },
+    { "key": "creatorPayWaybillPublicId", "value": "", "type": "string" },
+    { "key": "creatorPayWaybillQuoteId", "value": "", "type": "string" },
+    { "key": "creatorPayWaybillCheckoutKey", "value": "", "type": "string" },
+    { "key": "creatorPayWaybillCheckoutReference", "value": "", "type": "string" },
+    { "key": "creatorPayWaybillAuthorizationUrl", "value": "", "type": "string" },
+    { "key": "adminJwt", "value": "", "type": "string" },
+    { "key": "adminWaybillId", "value": "", "type": "string" },
+    { "key": "adminWaybillCreatorId", "value": "", "type": "string" },
+    { "key": "adminWaybillStatus", "value": "MANUAL_REVIEW", "type": "string" },
+    { "key": "adminWaybillPaymentStatus", "value": "REVIEW", "type": "string" }
+  ]
+}

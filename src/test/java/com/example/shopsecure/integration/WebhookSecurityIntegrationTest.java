@@ -2,10 +2,12 @@ package com.example.shopsecure.integration;
 
 import com.example.shopsecure.ShopsecureApplication;
 import com.example.shopsecure.entity.CreatorRole;
+import com.example.shopsecure.entity.EscrowReleasePolicy;
 import com.example.shopsecure.entity.Order;
 import com.example.shopsecure.entity.OrderFundingMode;
 import com.example.shopsecure.entity.OrderPaymentAttempt;
 import com.example.shopsecure.entity.OrderSettlement;
+import com.example.shopsecure.entity.OrderShipment;
 import com.example.shopsecure.entity.OrderStatus;
 import com.example.shopsecure.entity.PaymentAttemptStatus;
 import com.example.shopsecure.entity.PaymentReceipt;
@@ -16,6 +18,9 @@ import com.example.shopsecure.entity.SettlementStatus;
 import com.example.shopsecure.entity.SettlementType;
 import com.example.shopsecure.entity.User;
 import com.example.shopsecure.entity.VirtualAccount;
+import com.example.shopsecure.entity.Wallet;
+import com.example.shopsecure.entity.WalletWithdrawal;
+import com.example.shopsecure.entity.WalletWithdrawalStatus;
 import com.example.shopsecure.provider.common.WebhookPayload;
 import com.example.shopsecure.provider.payment.Bank;
 import com.example.shopsecure.provider.payment.BankAccountLookupRequest;
@@ -27,6 +32,10 @@ import com.example.shopsecure.provider.payment.PayoutRequest;
 import com.example.shopsecure.provider.payment.PayoutResponse;
 import com.example.shopsecure.provider.payment.PayoutStatusUpdatedEvent;
 import com.example.shopsecure.provider.payment.ResolvedBankAccount;
+import com.example.shopsecure.provider.shipping.ShipmentStatus;
+import com.example.shopsecure.provider.shipping.ShipmentTrackingStatus;
+import com.example.shopsecure.provider.shipping.ShippingProvider;
+import com.example.shopsecure.provider.shipping.ShippingProviderCode;
 import com.example.shopsecure.repository.GuestOrderAccessTokenRepository;
 import com.example.shopsecure.repository.OrderCounterpartyRepository;
 import com.example.shopsecure.repository.OrderParcelRepository;
@@ -43,6 +52,8 @@ import com.example.shopsecure.repository.UserRepository;
 import com.example.shopsecure.repository.VirtualAccountRepository;
 import com.example.shopsecure.repository.WalletRepository;
 import com.example.shopsecure.repository.WalletTransactionRepository;
+import com.example.shopsecure.repository.WalletWithdrawalRepository;
+import com.example.shopsecure.service.ShippingProviderRoutingService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -54,6 +65,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
@@ -70,6 +82,10 @@ import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -100,6 +116,7 @@ class WebhookSecurityIntegrationTest {
 
     private static final String PAYSTACK_PATH = "/api/webhooks/paystack";
     private static final String TERMINAL_PATH = "/api/webhooks/terminal";
+    private static final String CHOWDECK_PATH = "/api/webhooks/chowdeck";
     private static final String PAYSTACK_SECRET = "test-paystack-webhook-secret";
     private static final String TERMINAL_SECRET = "test-terminal-webhook-secret";
     private static final String BANK_REQUEST = """
@@ -186,6 +203,10 @@ class WebhookSecurityIntegrationTest {
     private OtpChallengeRepository otpChallengeRepository;
     @Autowired
     private WalletTransactionRepository walletTransactionRepository;
+    @Autowired
+    private WalletWithdrawalRepository withdrawalRepository;
+    @MockitoBean
+    private ShippingProviderRoutingService shippingProviderRoutingService;
 
     @BeforeEach
     void setUp() {
@@ -358,6 +379,8 @@ class WebhookSecurityIntegrationTest {
                 PaymentStatus.CONFIRMED,
                 SettlementStatus.PENDING
         );
+        order.setVendorPayoutRecipientCode("RCP_WEBHOOK_SUCCESS");
+        order = orderRepository.save(order);
         String payoutReference = "shopsecure_order_" + order.getId() + "_payout";
         Instant createdAt = Instant.parse("2026-08-07T09:00:00Z");
         settlementRepository.save(OrderSettlement.builder()
@@ -376,6 +399,9 @@ class WebhookSecurityIntegrationTest {
                   "data":{
                     "reference":"%s",
                     "transfer_code":"TRF_WEBHOOK_SUCCESS",
+                    "amount":8000,
+                    "currency":"NGN",
+                    "recipient":{"recipient_code":"RCP_WEBHOOK_SUCCESS"},
                     "transferred_at":"2026-08-07T10:30:00Z"
                   }
                 }
@@ -395,6 +421,210 @@ class WebhookSecurityIntegrationTest {
         assertThat(completedSettlement.getStatus()).isEqualTo(SettlementStatus.COMPLETED);
         assertThat(completedSettlement.getTransferId()).isEqualTo("TRF_WEBHOOK_SUCCESS");
         assertThat(completedSettlement.getUpdatedAt()).isEqualTo(Instant.parse("2026-08-07T10:30:00Z"));
+    }
+
+    @Test
+    void signedTransferWithKnownTransferIdAndWrongReferenceRequiresManualReview() throws Exception {
+        User creator = createUser("paystack-transfer-mismatch");
+        Order order = createOrder(
+                creator,
+                CreatorRole.BUYER,
+                OrderStatus.PAYOUT_PENDING,
+                PaymentStatus.CONFIRMED,
+                SettlementStatus.PENDING
+        );
+        order.setVendorPayoutRecipientCode("RCP_WEBHOOK_MISMATCH");
+        order = orderRepository.save(order);
+        String payoutReference = "shopsecure_order_" + order.getId() + "_payout";
+        Instant createdAt = Instant.parse("2026-08-07T09:00:00Z");
+        settlementRepository.save(OrderSettlement.builder()
+                .order(order)
+                .settlementType(SettlementType.EXTERNAL_PAYOUT)
+                .amount(order.getItemAmount())
+                .status(SettlementStatus.PENDING)
+                .idempotencyKey("webhook-transfer-mismatch-fixture")
+                .payoutReference(payoutReference)
+                .transferId("TRF_WEBHOOK_MISMATCH")
+                .createdAt(createdAt)
+                .updatedAt(createdAt)
+                .build());
+        String body = """
+                {
+                  "event":"transfer.success",
+                  "data":{
+                    "reference":"unexpected-webhook-reference",
+                    "transfer_code":"TRF_WEBHOOK_MISMATCH",
+                    "amount":8000,
+                    "currency":"NGN",
+                    "recipient":{"recipient_code":"RCP_WEBHOOK_MISMATCH"},
+                    "transferred_at":"2026-08-07T10:30:00Z"
+                  }
+                }
+                """;
+
+        mockMvc.perform(post(PAYSTACK_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Paystack-Signature", sign(body, PAYSTACK_SECRET))
+                        .content(body))
+                .andExpect(status().isOk());
+
+        OrderSettlement settlement = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
+        assertThat(settlement.getStatus()).isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(settlement.getUnexpectedPayoutReference()).isEqualTo("unexpected-webhook-reference");
+        assertThat(settlement.getUnexpectedTransferId()).isNull();
+        assertThat(orderRepository.findById(order.getId()).orElseThrow().getSettlementStatus())
+                .isEqualTo(SettlementStatus.REQUIRES_ACTION);
+    }
+
+    @Test
+    void conflictingValidReferenceAndTransferIdCannotCompleteTheReferenceMatchedPayout() throws Exception {
+        User firstCreator = createUser("paystack-transfer-owner");
+        User secondCreator = createUser("paystack-reference-owner");
+        Order transferOwner = createOrder(
+                firstCreator,
+                CreatorRole.BUYER,
+                OrderStatus.PAYOUT_PENDING,
+                PaymentStatus.CONFIRMED,
+                SettlementStatus.PENDING
+        );
+        Order referenceOwner = createOrder(
+                secondCreator,
+                CreatorRole.BUYER,
+                OrderStatus.PAYOUT_PENDING,
+                PaymentStatus.CONFIRMED,
+                SettlementStatus.PENDING
+        );
+        transferOwner.setVendorPayoutRecipientCode("RCP_COLLISION");
+        referenceOwner.setVendorPayoutRecipientCode("RCP_COLLISION");
+        orderRepository.saveAll(List.of(transferOwner, referenceOwner));
+        Instant createdAt = Instant.parse("2026-08-07T09:00:00Z");
+        String transferOwnerReference = "shopsecure_order_" + transferOwner.getId() + "_payout";
+        String referenceOwnerReference = "shopsecure_order_" + referenceOwner.getId() + "_payout";
+        settlementRepository.save(OrderSettlement.builder()
+                .order(transferOwner)
+                .settlementType(SettlementType.EXTERNAL_PAYOUT)
+                .amount(transferOwner.getItemAmount())
+                .status(SettlementStatus.PENDING)
+                .idempotencyKey("webhook-transfer-owner")
+                .payoutReference(transferOwnerReference)
+                .transferId("TRF_IDENTITY_COLLISION")
+                .createdAt(createdAt)
+                .updatedAt(createdAt)
+                .build());
+        settlementRepository.save(OrderSettlement.builder()
+                .order(referenceOwner)
+                .settlementType(SettlementType.EXTERNAL_PAYOUT)
+                .amount(referenceOwner.getItemAmount())
+                .status(SettlementStatus.PENDING)
+                .idempotencyKey("webhook-reference-owner")
+                .payoutReference(referenceOwnerReference)
+                .createdAt(createdAt)
+                .updatedAt(createdAt)
+                .build());
+        String body = """
+                {
+                  "event":"transfer.success",
+                  "data":{
+                    "reference":"%s",
+                    "transfer_code":"TRF_IDENTITY_COLLISION",
+                    "amount":8000,
+                    "currency":"NGN",
+                    "recipient":{"recipient_code":"RCP_COLLISION"},
+                    "transferred_at":"2026-08-07T10:30:00Z"
+                  }
+                }
+                """.formatted(referenceOwnerReference);
+
+        mockMvc.perform(post(PAYSTACK_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Paystack-Signature", sign(body, PAYSTACK_SECRET))
+                        .content(body))
+                .andExpect(status().isOk());
+
+        OrderSettlement transferMatched = settlementRepository.findByOrder_Id(transferOwner.getId()).orElseThrow();
+        OrderSettlement referenceMatched = settlementRepository.findByOrder_Id(referenceOwner.getId()).orElseThrow();
+        assertThat(transferMatched.getStatus()).isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(transferMatched.getUnexpectedPayoutReference()).isEqualTo(referenceOwnerReference);
+        assertThat(referenceMatched.getStatus()).isEqualTo(SettlementStatus.PENDING);
+        assertThat(referenceMatched.getTransferId()).isNull();
+        assertThat(orderRepository.findById(referenceOwner.getId()).orElseThrow().getStatus())
+                .isEqualTo(OrderStatus.PAYOUT_PENDING);
+    }
+
+    @Test
+    void orderTransferIdentityCannotCompleteAReferenceMatchedWalletWithdrawal() throws Exception {
+        User orderCreator = createUser("paystack-order-transfer-owner");
+        Order transferOwner = createOrder(
+                orderCreator,
+                CreatorRole.BUYER,
+                OrderStatus.PAYOUT_PENDING,
+                PaymentStatus.CONFIRMED,
+                SettlementStatus.PENDING
+        );
+        transferOwner.setVendorPayoutRecipientCode("RCP_CROSS_DOMAIN");
+        transferOwner = orderRepository.save(transferOwner);
+        Instant createdAt = Instant.parse("2026-08-07T09:00:00Z");
+        String transferOwnerReference = "shopsecure_order_" + transferOwner.getId() + "_payout";
+        settlementRepository.save(OrderSettlement.builder()
+                .order(transferOwner)
+                .settlementType(SettlementType.EXTERNAL_PAYOUT)
+                .amount(transferOwner.getItemAmount())
+                .status(SettlementStatus.PENDING)
+                .idempotencyKey("cross-domain-order-transfer")
+                .payoutReference(transferOwnerReference)
+                .transferId("TRF_CROSS_DOMAIN")
+                .createdAt(createdAt)
+                .updatedAt(createdAt)
+                .build());
+        User withdrawalOwner = createUser("paystack-wallet-reference-owner");
+        Wallet wallet = walletRepository.save(Wallet.builder()
+                .user(withdrawalOwner)
+                .balance(new BigDecimal("1000.00"))
+                .currency("NGN")
+                .createdAt(createdAt)
+                .updatedAt(createdAt)
+                .build());
+        String withdrawalReference = "withdrawal-cross-domain-reference";
+        WalletWithdrawal withdrawal = withdrawalRepository.save(WalletWithdrawal.builder()
+                .wallet(wallet)
+                .amount(new BigDecimal("80.00"))
+                .currency("NGN")
+                .status(WalletWithdrawalStatus.PENDING)
+                .idempotencyKey("cross-domain-wallet-reference")
+                .reference(withdrawalReference)
+                .payoutRecipientCode("RCP_CROSS_DOMAIN")
+                .accountNumberLast4("6789")
+                .bankName("Test Bank")
+                .accountName("Test Recipient")
+                .dispatchAttempt(1)
+                .createdAt(createdAt)
+                .updatedAt(createdAt)
+                .build());
+        String body = """
+                {
+                  "event":"transfer.success",
+                  "data":{
+                    "reference":"%s",
+                    "transfer_code":"TRF_CROSS_DOMAIN",
+                    "amount":8000,
+                    "currency":"NGN",
+                    "recipient":{"recipient_code":"RCP_CROSS_DOMAIN"},
+                    "transferred_at":"2026-08-07T10:30:00Z"
+                  }
+                }
+                """.formatted(withdrawalReference);
+
+        mockMvc.perform(post(PAYSTACK_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Paystack-Signature", sign(body, PAYSTACK_SECRET))
+                        .content(body))
+                .andExpect(status().isOk());
+
+        assertThat(settlementRepository.findByOrder_Id(transferOwner.getId()).orElseThrow().getStatus())
+                .isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        WalletWithdrawal unchangedWithdrawal = withdrawalRepository.findById(withdrawal.getId()).orElseThrow();
+        assertThat(unchangedWithdrawal.getStatus()).isEqualTo(WalletWithdrawalStatus.PENDING);
+        assertThat(unchangedWithdrawal.getTransferId()).isNull();
     }
 
     @Test
@@ -431,12 +661,139 @@ class WebhookSecurityIntegrationTest {
     }
 
     @Test
+    void chowdeckWebhookIsPublicButAcceptsOnlyNestedDeliveryReference() throws Exception {
+        mockMvc.perform(post(CHOWDECK_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {
+                                  "category":"ORDER_PICKED_UP",
+                                  "reference":"attacker-controlled-root-reference",
+                                  "payload":{
+                                    "reference":"order-404",
+                                    "status":"picked_up",
+                                    "timeline":[{"action":"ORDER_PICKED_UP"}]
+                                  }
+                                }
+                                """))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(post(CHOWDECK_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"reference":"order-404","status":"picked_up"}
+                                """))
+                .andExpect(status().isBadRequest());
+
+        mockMvc.perform(post(CHOWDECK_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"payload":{"reference":"../../order-404"}}
+                                """))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void chowdeckCallbackCannotForgePickupAndCanonicalPickupPaysItemAmountOnce() throws Exception {
+        User creator = createUser("chowdeck-canonical-pickup");
+        Order order = createOrder(
+                creator,
+                CreatorRole.VENDOR,
+                OrderStatus.READY_FOR_DELIVERY,
+                PaymentStatus.CONFIRMED,
+                SettlementStatus.NOT_STARTED
+        );
+        order.setEscrowReleasePolicy(EscrowReleasePolicy.CARRIER_PICKUP);
+        order.setVendorPayoutRecipientCode("RCP_CHOWDECK_CANONICAL");
+        order = orderRepository.save(order);
+        String reference = "order-" + order.getId();
+        Instant confirmedAt = Instant.parse("2026-08-21T10:00:00Z");
+        Instant pickupAt = Instant.parse("2026-08-21T10:05:00Z");
+        shipmentRepository.save(OrderShipment.builder()
+                .order(order)
+                .provider(ShippingProviderCode.CHOWDECK)
+                .providerShipmentId(reference)
+                .status(ShipmentStatus.PENDING)
+                .createdAt(Instant.now())
+                .updatedAt(Instant.now())
+                .build());
+        ShippingProvider canonicalProvider = mock(ShippingProvider.class);
+        when(shippingProviderRoutingService.require(ShippingProviderCode.CHOWDECK))
+                .thenReturn(canonicalProvider);
+        when(canonicalProvider.trackShipment(reference)).thenReturn(
+                new ShipmentTrackingStatus(
+                        reference,
+                        ShipmentStatus.CONFIRMED,
+                        confirmedAt,
+                        List.of(),
+                        reference,
+                        null
+                ),
+                new ShipmentTrackingStatus(
+                        reference,
+                        ShipmentStatus.IN_TRANSIT,
+                        pickupAt,
+                        List.of(),
+                        reference,
+                        null
+                ),
+                new ShipmentTrackingStatus(
+                        reference,
+                        ShipmentStatus.IN_TRANSIT,
+                        pickupAt,
+                        List.of(),
+                        reference,
+                        null
+                )
+        );
+        String forgedPickupBody = """
+                {
+                  "category":"ORDER_PICKED_UP",
+                  "payload":{
+                    "reference":"%s",
+                    "status":"picked_up",
+                    "updated_at":"2026-08-21T10:05:00Z"
+                  }
+                }
+                """.formatted(reference);
+
+        mockMvc.perform(post(CHOWDECK_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(forgedPickupBody))
+                .andExpect(status().isOk());
+
+        Order beforeCanonicalPickup = orderRepository.findById(order.getId()).orElseThrow();
+        assertThat(beforeCanonicalPickup.getCarrierPickupConfirmedAt()).isNull();
+        assertThat(settlementRepository.findByOrder_Id(order.getId())).isEmpty();
+
+        mockMvc.perform(post(CHOWDECK_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(forgedPickupBody))
+                .andExpect(status().isOk());
+        mockMvc.perform(post(CHOWDECK_PATH)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(forgedPickupBody))
+                .andExpect(status().isOk());
+
+        Order afterCanonicalPickup = orderRepository.findById(order.getId()).orElseThrow();
+        OrderSettlement settlement = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
+        assertThat(afterCanonicalPickup.getCarrierPickupConfirmedAt()).isEqualTo(pickupAt);
+        assertThat(settlement.getAmount()).isEqualByComparingTo("80.00");
+        assertThat(settlement.getPayoutReference())
+                .isEqualTo("shopsecure_order_" + order.getId() + "_payout");
+        assertThat(settlementRepository.count()).isEqualTo(1);
+        verify(canonicalProvider, times(3)).trackShipment(reference);
+    }
+
+    @Test
     void neighboringWebhookPathsAreNotPublic() {
         assertAll(
                 () -> assertAuthenticationRequired(post(PAYSTACK_PATH + "/replay")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}")),
                 () -> assertAuthenticationRequired(post(TERMINAL_PATH + "/replay")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}")),
+                () -> assertAuthenticationRequired(post(CHOWDECK_PATH + "/replay")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}")),
                 () -> assertAuthenticationRequired(post("/api/webhooks/unregistered")
@@ -455,7 +812,11 @@ class WebhookSecurityIntegrationTest {
                 () -> assertAuthenticationRequired(get(TERMINAL_PATH)),
                 () -> assertAuthenticationRequired(put(TERMINAL_PATH)),
                 () -> assertAuthenticationRequired(patch(TERMINAL_PATH)),
-                () -> assertAuthenticationRequired(delete(TERMINAL_PATH))
+                () -> assertAuthenticationRequired(delete(TERMINAL_PATH)),
+                () -> assertAuthenticationRequired(get(CHOWDECK_PATH)),
+                () -> assertAuthenticationRequired(put(CHOWDECK_PATH)),
+                () -> assertAuthenticationRequired(patch(CHOWDECK_PATH)),
+                () -> assertAuthenticationRequired(delete(CHOWDECK_PATH))
         );
     }
 
@@ -476,47 +837,7 @@ class WebhookSecurityIntegrationTest {
     }
 
     @Test
-    void shareTokenBankResolutionIsPublicOnlyForAwaitingGuestVendorOrder() throws Exception {
-        Order awaitingGuestVendor = createOrder(
-                createUser("awaiting-guest-vendor"),
-                CreatorRole.BUYER,
-                OrderStatus.AWAITING_COUNTERPARTY,
-                PaymentStatus.NOT_STARTED,
-                SettlementStatus.NOT_STARTED
-        );
-        Order noLongerAwaiting = createOrder(
-                createUser("guest-vendor-not-awaiting"),
-                CreatorRole.BUYER,
-                OrderStatus.AWAITING_SHIPPING_RATE,
-                PaymentStatus.NOT_STARTED,
-                SettlementStatus.NOT_STARTED
-        );
-        Order awaitingGuestBuyer = createOrder(
-                createUser("awaiting-guest-buyer"),
-                CreatorRole.VENDOR,
-                OrderStatus.AWAITING_COUNTERPARTY,
-                PaymentStatus.NOT_STARTED,
-                SettlementStatus.NOT_STARTED
-        );
-
-        mockMvc.perform(post("/orders/token/{shareToken}/bank-account/resolve", awaitingGuestVendor.getShareToken())
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(BANK_REQUEST))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.accountNumberMasked").value("******6789"));
-
-        mockMvc.perform(post("/orders/token/{shareToken}/bank-account/resolve", noLongerAwaiting.getShareToken())
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(BANK_REQUEST))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("This order is not accepting vendor payout details"));
-
-        mockMvc.perform(post("/orders/token/{shareToken}/bank-account/resolve", awaitingGuestBuyer.getShareToken())
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(BANK_REQUEST))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.error").value("This order is not accepting vendor payout details"));
-
+    void paymentLinksDoNotAcceptVendorBankDetails() throws Exception {
         mockMvc.perform(post("/orders/token/{shareToken}/bank-account/resolve", "unknown-share-token")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(BANK_REQUEST))
@@ -602,6 +923,7 @@ class WebhookSecurityIntegrationTest {
         processedWebhookRepository.deleteAllInBatch();
         settlementRepository.deleteAllInBatch();
         walletTransactionRepository.deleteAllInBatch();
+        withdrawalRepository.deleteAllInBatch();
         receiptRepository.deleteAllInBatch();
         paymentAttemptRepository.deleteAllInBatch();
         quoteRepository.deleteAllInBatch();

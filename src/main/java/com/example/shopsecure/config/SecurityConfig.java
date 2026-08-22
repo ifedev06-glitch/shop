@@ -57,12 +57,20 @@ public class SecurityConfig {
                                 "/api/auth/reset-password"
                         ).permitAll()
                         .requestMatchers(
-                                HttpMethod.POST,
-                                "/api/webhooks/paystack",
-                                "/api/webhooks/terminal"
+                                 HttpMethod.POST,
+                                 "/api/webhooks/paystack",
+                                 "/api/webhooks/terminal",
+                                 "/api/webhooks/chowdeck"
+                         ).permitAll()
+                        .requestMatchers(
+                                HttpMethod.GET,
+                                "/api/banks",
+                                "/api/locations/states",
+                                "/api/locations/states/*/cities",
+                                "/orders/tracking/*"
                         ).permitAll()
-                        .requestMatchers(HttpMethod.GET, "/api/banks").permitAll()
                         .requestMatchers("/orders/token/**").permitAll()
+                        .requestMatchers("/waybills/invitations/**").permitAll()
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated()
                 )
@@ -102,6 +110,7 @@ public class SecurityConfig {
         CorsConfiguration configuration = new CorsConfiguration();
         configuration.setAllowedOrigins(List.of(
                 "http://localhost:3000",
+                "https://shopsecure.app",
                 "https://www.shopsecure.app"
         ));
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));

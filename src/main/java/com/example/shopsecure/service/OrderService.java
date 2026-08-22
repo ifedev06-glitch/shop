@@ -9,6 +9,8 @@ import com.example.shopsecure.exception.OtpVerificationException;
 import com.example.shopsecure.exception.ResourceNotFoundException;
 import com.example.shopsecure.provider.payment.*;
 import com.example.shopsecure.repository.*;
+import com.example.shopsecure.util.NigerianPhoneNumber;
+import com.example.shopsecure.util.Pagination;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
@@ -16,10 +18,12 @@ import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.Base64;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
 
@@ -43,25 +47,39 @@ public class OrderService {
     private final PayoutProvider payoutProvider;
     private final ApplicationEventPublisher eventPublisher;
     private final OrderStatusService orderStatusService;
+    private final OrderTrackingService trackingService;
     private final SecureRandom secureRandom = new SecureRandom();
 
-    @Value("${app.base-url}")
-    private String appBaseUrl;
+    @Value("${app.frontend-base-url}")
+    private String frontendBaseUrl;
 
     @Transactional
     public CreateOrderResponse createOrder(CreateOrderRequest request) {
         User creator = currentUser();
         requireCompleteAccount(creator);
-        requireVirtualAccount(creator);
-        validateCreatorParcel(request);
+        if (request.creatorRole() == CreatorRole.BUYER) {
+            requireVirtualAccount(creator);
+        }
+
+        ResolvedBankAccount resolvedBank = bankAccountService.resolve(
+                request.vendorBankAccount().accountNumber(),
+                request.vendorBankAccount().bankCode()
+        );
+        PayoutRecipientResponse payoutRecipient = payoutProvider.createPayoutRecipient(
+                new PayoutRecipientRequest(
+                        resolvedBank.accountName(),
+                        resolvedBank.accountNumber(),
+                        resolvedBank.bankCode()
+                )
+        );
 
         Instant now = Instant.now();
-        Order order = orderRepository.save(Order.builder()
+        Order order = Order.builder()
                 .itemAmount(request.amount())
                 .itemDescription(request.itemDescription().trim())
                 .creatorFirstName(creator.getFirstname().trim())
                 .creatorLastName(creator.getLastname().trim())
-                .creatorPhoneNumber(creator.getPhoneNumber())
+                .creatorPhoneNumber(NigerianPhoneNumber.normalize(creator.getPhoneNumber()))
                 .creatorEmail(creator.getEmail())
                 .creatorAddressLine1(request.creatorAddress().line1().trim())
                 .creatorAddressLine2(trimToEmpty(request.creatorAddress().line2()))
@@ -73,15 +91,21 @@ public class OrderService {
                 .fundingMode(request.creatorRole() == CreatorRole.BUYER
                         ? OrderFundingMode.WALLET
                         : OrderFundingMode.PAYSTACK_CHECKOUT)
-                .status(OrderStatus.AWAITING_COUNTERPARTY)
+                .escrowReleasePolicy(EscrowReleasePolicy.CARRIER_PICKUP)
+                .status(OrderStatus.AWAITING_SHIPPING_RATE)
                 .shareToken(generateUniqueShareToken())
+                .vendorBankAccountLast4(lastFour(resolvedBank.accountNumber()))
+                .vendorBankCode(resolvedBank.bankCode())
+                .vendorBankName(resolvedBank.bankName())
+                .vendorBankAccountName(resolvedBank.accountName())
+                .vendorPayoutRecipientCode(payoutRecipient.recipientId())
                 .creator(creator)
                 .createdAt(LocalDateTime.now())
                 .updatedAt(now)
-                .build());
-        if (request.creatorRole() == CreatorRole.VENDOR) {
-            saveParcel(order, request.parcel());
-        }
+                .build();
+        order = orderRepository.save(order);
+        saveCounterparty(order, request.counterparty(), now);
+        saveParcel(order, request.parcel());
         orderStatusService.recordInitial(order, "Order created by " + roleName(order.getCreatorRole()));
 
         return new CreateOrderResponse(
@@ -92,9 +116,8 @@ public class OrderService {
                 order.getCreatorRole(),
                 order.getCreatorRole().opposite(),
                 order.getFundingMode(),
+                order.getEscrowReleasePolicy(),
                 order.getStatus(),
-                order.getShareToken(),
-                publicOrderLink(order.getShareToken()),
                 order.getCreatedAt()
         );
     }
@@ -102,20 +125,135 @@ public class OrderService {
     @Transactional(readOnly = true)
     public PublicOrderResponse getByShareToken(String shareToken) {
         Order order = findByShareToken(shareToken);
+        requireBuyerPaymentOrder(order);
         boolean verified = counterpartyRepository.findByOrder_Id(order.getId())
                 .map(OrderCounterparty::isPhoneVerified)
                 .orElse(false);
+        ShippingQuote selectedQuote = quoteRepository.findByShipment_Order_IdAndStatus(
+                order.getId(),
+                ShippingQuoteStatus.SELECTED
+        ).orElseGet(() -> quoteRepository.findByShipment_Order_IdAndStatus(
+                order.getId(),
+                ShippingQuoteStatus.USED
+        ).orElse(null));
         return new PublicOrderResponse(
                 order.getItemAmount(),
                 order.getItemDescription(),
+                order.getCreatorFirstName() + " " + order.getCreatorLastName(),
                 order.getCurrency(),
                 order.getStatus(),
                 order.getCreatorRole(),
                 order.getCreatorRole().opposite(),
                 verified,
                 order.getPaymentStatus(),
-                order.getSettlementStatus()
+                order.getSettlementStatus(),
+                order.getEscrowReleasePolicy(),
+                pricing(order),
+                selectedQuote == null ? null : new ShippingQuoteResponse(
+                        selectedQuote.getId(),
+                        selectedQuote.getCarrierName(),
+                        selectedQuote.getCarrierLogo(),
+                        selectedQuote.getServiceDescription(),
+                        selectedQuote.getDeliveryFee(),
+                        selectedQuote.getServiceFee(),
+                        selectedQuote.getBuyerTotal(),
+                        selectedQuote.getCurrency(),
+                        selectedQuote.getPickupEstimate(),
+                        selectedQuote.getDeliveryEstimate(),
+                        selectedQuote.getExpiresAt()
+                )
         );
+    }
+
+    @Transactional
+    public OtpChallengeResponse requestBuyerPaymentAccess(String shareToken) {
+        Order order = findByShareTokenForUpdate(shareToken);
+        requireBuyerPaymentOrder(order);
+        if (order.getStatus() != OrderStatus.AWAITING_PAYMENT) {
+            throw new BusinessException("Order is not awaiting buyer payment");
+        }
+        requireActiveSelectedQuote(order);
+        OrderCounterparty buyer = counterpartyRepository.findByOrderIdForUpdate(order.getId())
+                .orElseThrow(() -> new BusinessException("Buyer details are not available"));
+        if (buyer.isPhoneVerified()) {
+            throw new BusinessException("Buyer payment access is already verified; use access recovery");
+        }
+        OtpService.IssuedOtp issued = otpService.issue(
+                OtpPurpose.ORDER_COUNTERPARTY,
+                order.getShareToken(),
+                buyer.getPhoneNumber()
+        );
+        otpDeliveryService.send(
+                buyer.getPhoneNumber(),
+                buyer.getEmail(),
+                issued.code(),
+                OtpPurpose.ORDER_COUNTERPARTY
+        );
+        return challengeResponse(issued, CreatorRole.BUYER, buyer.getPhoneNumber());
+    }
+
+    @Transactional(noRollbackFor = OtpVerificationException.class)
+    public OrderVerificationResponse verifyBuyerPaymentOtp(
+            String shareToken,
+            String challengeId,
+            String code
+    ) {
+        Order order = findByShareTokenForUpdate(shareToken);
+        requireBuyerPaymentOrder(order);
+        if (order.getStatus() != OrderStatus.AWAITING_PAYMENT) {
+            throw new BusinessException("Order is not awaiting buyer payment");
+        }
+        requireActiveSelectedQuote(order);
+        OrderCounterparty buyer = counterpartyRepository.findByOrderIdForUpdate(order.getId())
+                .orElseThrow(() -> new BusinessException("Buyer details are not available"));
+        OtpChallenge challenge = otpService.requireChallenge(
+                challengeId,
+                OtpPurpose.ORDER_COUNTERPARTY,
+                order.getShareToken()
+        );
+        if (!challenge.getPhoneNumber().equals(buyer.getPhoneNumber())) {
+            throw new OtpVerificationException("Verification challenge does not match the buyer");
+        }
+        otpService.verify(OtpPurpose.ORDER_COUNTERPARTY, order.getShareToken(), challengeId, code);
+        buyer.setPhoneVerified(true);
+        buyer.setUpdatedAt(Instant.now());
+        counterpartyRepository.save(buyer);
+        GuestOrderAccessService.IssuedGuestToken guestToken = guestAccessService.issue(order, buyer);
+        return new OrderVerificationResponse(
+                order.getStatus(),
+                CreatorRole.BUYER,
+                true,
+                guestToken.token(),
+                guestToken.expiresAt()
+        );
+    }
+
+    @Transactional
+    public OtpChallengeResponse resendBuyerPaymentOtp(String shareToken, String challengeId) {
+        Order order = findByShareTokenForUpdate(shareToken);
+        requireBuyerPaymentOrder(order);
+        if (order.getStatus() != OrderStatus.AWAITING_PAYMENT) {
+            throw new BusinessException("Order is not awaiting buyer payment");
+        }
+        requireActiveSelectedQuote(order);
+        otpService.requireChallenge(challengeId, OtpPurpose.ORDER_COUNTERPARTY, order.getShareToken());
+        OrderCounterparty buyer = counterpartyRepository.findByOrderIdForUpdate(order.getId())
+                .orElseThrow(() -> new BusinessException("Buyer details are not available"));
+        if (buyer.isPhoneVerified()) {
+            throw new BusinessException("Buyer payment access is already verified; use access recovery");
+        }
+        OtpService.IssuedOtp issued = otpService.issue(
+                OtpPurpose.ORDER_COUNTERPARTY,
+                order.getShareToken(),
+                buyer.getPhoneNumber()
+        );
+        otpDeliveryService.send(
+                buyer.getPhoneNumber(),
+                buyer.getEmail(),
+                issued.code(),
+                OtpPurpose.ORDER_COUNTERPARTY
+        );
+        return challengeResponse(issued, CreatorRole.BUYER, buyer.getPhoneNumber());
     }
 
     @Transactional(readOnly = true)
@@ -140,11 +278,37 @@ public class OrderService {
     }
 
     @Transactional(readOnly = true)
-    public List<OrderDetailsResponse> getOrders() {
+    public PageResponse<OrderDetailsResponse> getOrders(int page, int size) {
         User creator = currentUser();
-        return orderRepository.findByCreator_IdOrderByCreatedAtDesc(creator.getId()).stream()
-                .map(this::details)
-                .toList();
+        return PageResponse.from(orderRepository.findByCreator_Id(
+                creator.getId(),
+                Pagination.newestFirst(page, size)
+        ).map(this::details));
+    }
+
+    @Transactional(readOnly = true)
+    public SellerPendingAmountResponse getSellerPendingAmount() {
+        User seller = currentUser();
+        OrderRepository.SellerPendingAmountProjection summary = orderRepository
+                .summarizeSellerPendingAmount(
+                        seller.getId(),
+                        CreatorRole.VENDOR,
+                        CreatorRole.BUYER,
+                        EnumSet.of(OrderStatus.COMPLETED, OrderStatus.CANCELLED),
+                        SettlementStatus.COMPLETED,
+                        PaymentStatus.CONFIRMED
+                );
+        BigDecimal pending = amountOrZero(summary == null ? null : summary.getPendingAmount());
+        BigDecimal funded = amountOrZero(summary == null ? null : summary.getFundedPendingAmount());
+        return new SellerPendingAmountResponse(
+                pending,
+                funded,
+                pending.subtract(funded),
+                countOrZero(summary == null ? null : summary.getActiveOrderCount()),
+                countOrZero(summary == null ? null : summary.getFundedOrderCount()),
+                "NGN",
+                Instant.now()
+        );
     }
 
     @Transactional(readOnly = true)
@@ -187,7 +351,7 @@ public class OrderService {
         counterparty.setUser(null);
         counterparty.setFirstName(request.firstName().trim());
         counterparty.setLastName(request.lastName().trim());
-        counterparty.setPhoneNumber(request.phoneNumber().trim());
+        counterparty.setPhoneNumber(NigerianPhoneNumber.normalize(request.phoneNumber()));
         counterparty.setEmail(request.email().trim().toLowerCase(Locale.ROOT));
         counterparty.setAddressLine1(request.address().line1().trim());
         counterparty.setAddressLine2(trimToEmpty(request.address().line2()));
@@ -320,6 +484,7 @@ public class OrderService {
     @Transactional
     public OtpChallengeResponse requestGuestAccessRecovery(String shareToken) {
         Order order = findByShareTokenForUpdate(shareToken);
+        requireBuyerPaymentOrder(order);
         if (order.getStatus() == OrderStatus.COMPLETED || order.getStatus() == OrderStatus.CANCELLED) {
             throw new BusinessException("Guest access can no longer be recovered for this order");
         }
@@ -351,6 +516,7 @@ public class OrderService {
             String code
     ) {
         Order order = findByShareTokenForUpdate(shareToken);
+        requireBuyerPaymentOrder(order);
         if (order.getStatus() == OrderStatus.COMPLETED || order.getStatus() == OrderStatus.CANCELLED) {
             throw new BusinessException("Guest access can no longer be recovered for this order");
         }
@@ -408,6 +574,7 @@ public class OrderService {
         ).orElse(null));
         return new OrderDetailsResponse(
                 order.getId(),
+                buyerPaymentLink(order),
                 order.getItemDescription(),
                 order.getItemAmount(),
                 order.getCurrency(),
@@ -417,13 +584,16 @@ public class OrderService {
                 order.getStatus(),
                 order.getPaymentStatus(),
                 order.getSettlementStatus(),
+                order.getEscrowReleasePolicy(),
                 pricing(order),
                 showDirectPaymentInstructions(order) ? paymentInstructions(order) : null,
                 counterparty(counterparty),
+                vendorPayoutAccount(order),
                 parcel(parcel),
                 shipping(shipment, quote),
                 order.getFundedAt(),
                 order.getDeliveryConfirmedAt(),
+                order.getCarrierPickupConfirmedAt(),
                 order.getCompletedAt(),
                 order.getCreatedAt(),
                 order.getUpdatedAt()
@@ -499,23 +669,22 @@ public class OrderService {
     }
 
     private ShippingStatusResponse shipping(OrderShipment shipment, ShippingQuote quote) {
-        return shipment == null ? null : new ShippingStatusResponse(
+        if (shipment == null) {
+            return null;
+        }
+        OrderTrackingService.TrackingLink trackingLink = trackingService.linkForOrder(
+                shipment.getOrder().getId()
+        );
+        return new ShippingStatusResponse(
                 shipment.getStatus(),
                 quote == null ? null : quote.getCarrierName(),
                 shipment.getTrackingReference(),
                 shipment.getTrackingUrl(),
+                trackingLink == null ? null : trackingLink.url(),
+                trackingLink == null ? null : trackingLink.availableAt(),
                 quote == null ? null : quote.getDeliveryEstimate(),
                 shipment.getUpdatedAt()
         );
-    }
-
-    private void validateCreatorParcel(CreateOrderRequest request) {
-        if (request.creatorRole() == CreatorRole.VENDOR && request.parcel() == null) {
-            throw new BusinessException("A vendor creator must provide parcel details");
-        }
-        if (request.creatorRole() == CreatorRole.BUYER && request.parcel() != null) {
-            throw new BusinessException("The vendor must provide parcel details");
-        }
     }
 
     private void validateCounterpartyData(CreatorRole role, CounterpartyInfoRequest request) {
@@ -544,6 +713,38 @@ public class OrderService {
         parcel.setWidthCm(request.widthCm());
         parcel.setHeightCm(request.heightCm());
         parcelRepository.save(parcel);
+    }
+
+    private void saveCounterparty(Order order, OrderPartyRequest request, Instant now) {
+        OrderCounterparty counterparty = OrderCounterparty.builder()
+                .order(order)
+                .user(null)
+                .firstName(request.firstName().trim())
+                .lastName(request.lastName().trim())
+                .phoneNumber(NigerianPhoneNumber.normalize(request.phoneNumber()))
+                .email(request.email().trim().toLowerCase(Locale.ROOT))
+                .addressLine1(request.address().line1().trim())
+                .addressLine2(trimToEmpty(request.address().line2()))
+                .city(request.address().city().trim())
+                .state(request.address().state().trim())
+                .country(request.address().country().toUpperCase(Locale.ROOT))
+                .postalCode(request.address().postalCode().trim())
+                .phoneVerified(false)
+                .createdAt(LocalDateTime.now())
+                .updatedAt(now)
+                .build();
+        counterpartyRepository.save(counterparty);
+    }
+
+    private VendorPayoutAccountResponse vendorPayoutAccount(Order order) {
+        if (order.getVendorBankAccountLast4() == null) {
+            return null;
+        }
+        return new VendorPayoutAccountResponse(
+                order.getVendorBankAccountLast4(),
+                order.getVendorBankAccountName(),
+                order.getVendorBankName()
+        );
     }
 
     private void clearBankDetails(OrderCounterparty counterparty) {
@@ -607,6 +808,14 @@ public class OrderService {
         return role == CreatorRole.VENDOR ? "vendor" : "buyer";
     }
 
+    private BigDecimal amountOrZero(BigDecimal amount) {
+        return amount == null ? BigDecimal.ZERO.setScale(2) : amount.setScale(2);
+    }
+
+    private long countOrZero(Long count) {
+        return count == null ? 0 : count;
+    }
+
     private String generateUniqueShareToken() {
         for (int attempt = 0; attempt < 5; attempt++) {
             byte[] bytes = new byte[32];
@@ -620,7 +829,44 @@ public class OrderService {
     }
 
     private String publicOrderLink(String shareToken) {
-        return appBaseUrl.replaceAll("/+$", "") + "/orders/token/" + shareToken;
+        return frontendBaseUrl.replaceAll("/+$", "") + "/orders/token/" + shareToken;
+    }
+
+    public String buyerPaymentLink(Order order) {
+        if (order == null
+                || order.getCreatorRole() != CreatorRole.VENDOR
+                || order.getFundingMode() != OrderFundingMode.PAYSTACK_CHECKOUT
+                || order.getTotalAmount() == null
+                || order.getStatus() == OrderStatus.CANCELLED) {
+            return null;
+        }
+        return publicOrderLink(order.getShareToken());
+    }
+
+    private void requireBuyerPaymentOrder(Order order) {
+        if (order.getCreatorRole() != CreatorRole.VENDOR
+                || order.getFundingMode() != OrderFundingMode.PAYSTACK_CHECKOUT
+                || order.getTotalAmount() == null) {
+            throw new ResourceNotFoundException("Buyer payment order not found");
+        }
+    }
+
+    private void requireActiveSelectedQuote(Order order) {
+        ShippingQuote quote = quoteRepository.findByShipment_Order_IdAndStatus(
+                        order.getId(),
+                        ShippingQuoteStatus.SELECTED
+                )
+                .orElseThrow(() -> new BusinessException("Selected shipping quote is not available"));
+        if (!quote.getExpiresAt().isAfter(Instant.now())) {
+            throw new BusinessException("Selected shipping quote has expired; creator must request fresh rates");
+        }
+    }
+
+    private String lastFour(String accountNumber) {
+        if (accountNumber == null || accountNumber.length() < 4) {
+            throw new BusinessException("Resolved vendor account number is invalid");
+        }
+        return accountNumber.substring(accountNumber.length() - 4);
     }
 
     private String accessRecoverySubject(Order order) {

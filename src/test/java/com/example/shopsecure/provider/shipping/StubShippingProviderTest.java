@@ -32,6 +32,8 @@ class StubShippingProviderTest {
         ShipmentResponse shipment = provider.createQuickShipment(request);
         assertThat(shipment.shipmentId()).startsWith("SHP-MOCK-");
         assertThat(shipment.status()).isEqualTo(ShipmentStatus.DRAFT);
+        assertThat(provider.trackShipment(shipment.shipmentId()).trackingUrl())
+                .isEqualTo(shipment.trackingUrl());
 
         var rates = provider.getRates(shipment.shipmentId(), "ngn");
         assertThat(rates).hasSize(2);
@@ -50,6 +52,16 @@ class StubShippingProviderTest {
         assertThat(cancelled.status()).isEqualTo(ShipmentStatus.CANCELLED);
         assertThat(provider.trackShipment(shipment.shipmentId()).currentStatus())
                 .isEqualTo(ShipmentStatus.CANCELLED);
+    }
+
+    @Test
+    void providesDeterministicNigerianStatesAndCities() {
+        assertThat(provider.getStates("ng"))
+                .extracting(ShippingState::code)
+                .containsExactly("FC", "LA", "RI");
+        assertThat(provider.getCities("NG"))
+                .extracting(ShippingCity::name)
+                .containsExactly("Abuja", "Epe", "Ikeja", "Lagos", "Port Harcourt");
     }
 
     @Test

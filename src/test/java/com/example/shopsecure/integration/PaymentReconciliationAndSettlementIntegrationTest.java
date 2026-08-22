@@ -4,8 +4,10 @@ import com.example.shopsecure.ShopsecureApplication;
 import com.example.shopsecure.dto.response.DeliveryConfirmationResponse;
 import com.example.shopsecure.dto.response.OtpChallengeResponse;
 import com.example.shopsecure.entity.CreatorRole;
+import com.example.shopsecure.entity.EscrowReleasePolicy;
 import com.example.shopsecure.entity.Order;
 import com.example.shopsecure.entity.OrderCounterparty;
+import com.example.shopsecure.entity.OrderParcel;
 import com.example.shopsecure.entity.OrderPaymentAttempt;
 import com.example.shopsecure.entity.OrderShipment;
 import com.example.shopsecure.entity.OrderSettlement;
@@ -18,6 +20,7 @@ import com.example.shopsecure.entity.PaymentStatus;
 import com.example.shopsecure.entity.Role;
 import com.example.shopsecure.entity.SettlementStatus;
 import com.example.shopsecure.entity.SettlementType;
+import com.example.shopsecure.entity.SettlementTrigger;
 import com.example.shopsecure.entity.ShippingQuote;
 import com.example.shopsecure.entity.ShippingQuoteStatus;
 import com.example.shopsecure.entity.User;
@@ -26,7 +29,10 @@ import com.example.shopsecure.entity.Wallet;
 import com.example.shopsecure.entity.WalletTransaction;
 import com.example.shopsecure.entity.WalletTransactionType;
 import com.example.shopsecure.entity.WalletPaymentOutcome;
+import com.example.shopsecure.entity.WalletWithdrawal;
+import com.example.shopsecure.entity.WalletWithdrawalStatus;
 import com.example.shopsecure.exception.BusinessException;
+import com.example.shopsecure.exception.PayoutRejectedException;
 import com.example.shopsecure.provider.common.WebhookPayload;
 import com.example.shopsecure.provider.notification.SmsProvider;
 import com.example.shopsecure.provider.payment.PaymentProvider;
@@ -40,8 +46,11 @@ import com.example.shopsecure.provider.payment.PayoutStatusUpdatedEvent;
 import com.example.shopsecure.provider.shipping.ShipmentResponse;
 import com.example.shopsecure.provider.shipping.ShipmentStatus;
 import com.example.shopsecure.provider.shipping.ShipmentStatusUpdatedEvent;
+import com.example.shopsecure.provider.shipping.ShipmentTrackingCheckpoint;
 import com.example.shopsecure.provider.shipping.ShipmentTrackingStatus;
+import com.example.shopsecure.provider.shipping.AddressValidationResult;
 import com.example.shopsecure.provider.shipping.ShippingProvider;
+import com.example.shopsecure.provider.shipping.ShippingRateOption;
 import com.example.shopsecure.repository.GuestOrderAccessTokenRepository;
 import com.example.shopsecure.repository.OrderCounterpartyRepository;
 import com.example.shopsecure.repository.OrderParcelRepository;
@@ -58,6 +67,7 @@ import com.example.shopsecure.repository.UserRepository;
 import com.example.shopsecure.repository.VirtualAccountRepository;
 import com.example.shopsecure.repository.WalletRepository;
 import com.example.shopsecure.repository.WalletTransactionRepository;
+import com.example.shopsecure.repository.WalletWithdrawalRepository;
 import com.example.shopsecure.service.EmailService;
 import com.example.shopsecure.service.GuestOrderAccessService;
 import com.example.shopsecure.service.GuestOrderStatusService;
@@ -77,6 +87,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -85,8 +96,12 @@ import java.util.List;
 import java.util.EnumSet;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -176,16 +191,25 @@ class PaymentReconciliationAndSettlementIntegrationTest {
     private OtpChallengeRepository otpChallengeRepository;
     @Autowired
     private WalletTransactionRepository walletTransactionRepository;
+    @Autowired
+    private WalletWithdrawalRepository withdrawalRepository;
 
     @BeforeEach
     void setUp() {
         cleanDatabase();
         reset(paymentProvider, payoutProvider, shippingProvider, smsProvider, emailService);
-        when(shippingProvider.trackShipment(anyString())).thenReturn(new ShipmentTrackingStatus(
-                ShipmentStatus.DRAFT,
-                Instant.now(),
-                List.of()
-        ));
+        when(shippingProvider.validateAddress(any())).thenAnswer(invocation ->
+                new AddressValidationResult(true, invocation.getArgument(0))
+        );
+        when(shippingProvider.trackShipment(anyString())).thenAnswer(invocation ->
+                new ShipmentTrackingStatus(
+                        invocation.getArgument(0),
+                        ShipmentStatus.DRAFT,
+                        Instant.now(),
+                        List.of(),
+                        null,
+                        null
+                ));
     }
 
     @AfterEach
@@ -303,6 +327,122 @@ class PaymentReconciliationAndSettlementIntegrationTest {
     }
 
     @Test
+    @WithMockUser(username = BUYER_CREATOR_EMAIL, roles = "USER")
+    void expiredQuoteCannotDebitTheBuyerWallet() {
+        User creator = createCreator(BUYER_CREATOR_EMAIL, "2030303030");
+        PaymentFixture fixture = createAwaitingPaymentFixture(creator, OrderFundingMode.WALLET);
+        ShippingQuote expiredQuote = fixture.quote();
+        expiredQuote.setExpiresAt(Instant.now().minusSeconds(1));
+        quoteRepository.saveAndFlush(expiredQuote);
+        Wallet wallet = walletRepository.findByUser_Id(creator.getId()).orElseThrow();
+        wallet.setBalance(TOTAL_AMOUNT);
+        walletRepository.saveAndFlush(wallet);
+
+        assertThatThrownBy(() -> walletFundingService.pay(
+                fixture.order().getId(),
+                "expired-wallet-payment"
+        )).isInstanceOf(BusinessException.class)
+                .hasMessage("Selected shipping quote has expired; request fresh rates");
+
+        assertThat(walletRepository.findByUser_Id(creator.getId()).orElseThrow().getBalance())
+                .isEqualByComparingTo(TOTAL_AMOUNT);
+        assertThat(walletTransactionRepository.count()).isZero();
+        assertThat(orderRepository.findById(fixture.order().getId()).orElseThrow().getPaymentStatus())
+                .isEqualTo(PaymentStatus.PENDING);
+    }
+
+    @Test
+    @WithMockUser(username = BUYER_CREATOR_EMAIL, roles = "USER")
+    void creatorCanRequestFreshRatesAfterAnUnfundedQuoteExpires() {
+        User creator = createCreator(BUYER_CREATOR_EMAIL, "2040404040");
+        PaymentFixture fixture = createAwaitingPaymentFixture(creator, OrderFundingMode.WALLET);
+        createVerifiedCounterparty(fixture.order(), "RCP_FRESH_RATE_VENDOR");
+        parcelRepository.save(OrderParcel.builder()
+                .order(fixture.order())
+                .weightKg(new BigDecimal("2.000"))
+                .lengthCm(new BigDecimal("20.00"))
+                .widthCm(new BigDecimal("15.00"))
+                .heightCm(new BigDecimal("10.00"))
+                .quantity(1)
+                .parcelType("parcel")
+                .createdAt(Instant.now())
+                .build());
+        ShippingQuote expiredQuote = fixture.quote();
+        expiredQuote.setExpiresAt(Instant.now().minusSeconds(1));
+        quoteRepository.saveAndFlush(expiredQuote);
+        OrderPaymentAttempt staleAttempt = createCheckoutAttempt(
+                fixture.order(),
+                "failed-before-requote"
+        );
+        staleAttempt.setStatus(PaymentAttemptStatus.FAILED);
+        staleAttempt.setCompletedAt(Instant.now().minusSeconds(2));
+        paymentAttemptRepository.saveAndFlush(staleAttempt);
+        when(shippingProvider.getRates(fixture.shipment().getProviderShipmentId(), CURRENCY))
+                .thenReturn(List.of(new ShippingRateOption(
+                        "fresh-rate",
+                        "fresh-internal-rate",
+                        "Fresh Logistics",
+                        null,
+                        "Fresh delivery",
+                        PROVIDER_DELIVERY_FEE,
+                        CURRENCY,
+                        "Today",
+                        "Tomorrow"
+                )));
+
+        var freshQuotes = shippingService.createCreatorQuotes(fixture.order().getId());
+
+        Order resetOrder = orderRepository.findById(fixture.order().getId()).orElseThrow();
+        assertThat(freshQuotes).singleElement().satisfies(quote -> {
+            assertThat(quote.carrierName()).isEqualTo("Fresh Logistics");
+            assertThat(quote.expiresAt()).isAfter(Instant.now());
+        });
+        assertThat(resetOrder.getStatus()).isEqualTo(OrderStatus.AWAITING_SHIPPING_RATE);
+        assertThat(resetOrder.getPaymentStatus()).isEqualTo(PaymentStatus.NOT_STARTED);
+        assertThat(resetOrder.getTotalAmount()).isNull();
+        assertThat(quoteRepository.findById(expiredQuote.getId()).orElseThrow().getStatus())
+                .isEqualTo(ShippingQuoteStatus.EXPIRED);
+        assertThat(paymentAttemptRepository.findById(staleAttempt.getId()).orElseThrow().getStatus())
+                .isEqualTo(PaymentAttemptStatus.SUPERSEDED);
+
+        paymentService.handleEvent(checkoutEvent(
+                "delayed-success-after-requote",
+                staleAttempt.getProviderReference(),
+                Instant.now()
+        ));
+        assertThat(receiptByEventKey("delayed-success-after-requote").getClassification())
+                .isEqualTo(PaymentReceiptClassification.LATE);
+        assertThat(orderRepository.findById(fixture.order().getId()).orElseThrow().getStatus())
+                .isEqualTo(OrderStatus.MANUAL_REVIEW);
+    }
+
+    @Test
+    @WithMockUser(username = BUYER_CREATOR_EMAIL, roles = "USER")
+    void expiredQuoteWithInitializedCheckoutMovesToManualReview() {
+        User creator = createCreator(BUYER_CREATOR_EMAIL, "2050505050");
+        PaymentFixture fixture = createAwaitingPaymentFixture(
+                creator,
+                OrderFundingMode.PAYSTACK_CHECKOUT
+        );
+        ShippingQuote expiredQuote = fixture.quote();
+        expiredQuote.setExpiresAt(Instant.now().minusSeconds(1));
+        quoteRepository.saveAndFlush(expiredQuote);
+        OrderPaymentAttempt attempt = createCheckoutAttempt(
+                fixture.order(),
+                "expired-initialized-checkout"
+        );
+
+        assertThatThrownBy(() -> shippingService.createCreatorQuotes(fixture.order().getId()))
+                .isInstanceOf(BusinessException.class)
+                .hasMessage("Expired order quote requires payment review");
+
+        assertThat(orderRepository.findById(fixture.order().getId()).orElseThrow().getStatus())
+                .isEqualTo(OrderStatus.MANUAL_REVIEW);
+        assertThat(paymentAttemptRepository.findById(attempt.getId()).orElseThrow().getStatus())
+                .isEqualTo(PaymentAttemptStatus.INITIALIZED);
+    }
+
+    @Test
     void duplicateTopUpCreditsWalletOnceAndLeavesWalletOrderAwaitingManualRetry() {
         User creator = createCreator("wallet-top-up@example.com", "2120202020");
         PaymentFixture fixture = createAwaitingPaymentFixture(creator, OrderFundingMode.WALLET);
@@ -377,6 +517,32 @@ class PaymentReconciliationAndSettlementIntegrationTest {
     }
 
     @Test
+    void checkoutCapturedAfterQuoteExpiryIsHeldForManualReview() {
+        User vendor = createCreator("late-checkout-vendor@example.com", "2190202020");
+        PaymentFixture fixture = createAwaitingPaymentFixture(vendor, OrderFundingMode.PAYSTACK_CHECKOUT);
+        ShippingQuote expiredQuote = fixture.quote();
+        expiredQuote.setExpiresAt(Instant.now().minusSeconds(1));
+        quoteRepository.saveAndFlush(expiredQuote);
+        OrderPaymentAttempt attempt = createCheckoutAttempt(fixture.order(), "checkout-late-capture");
+
+        paymentService.handleEvent(checkoutEvent(
+                "checkout-late-event",
+                attempt.getProviderReference(),
+                Instant.now()
+        ));
+
+        Order reviewed = orderRepository.findById(fixture.order().getId()).orElseThrow();
+        OrderPaymentAttempt captured = paymentAttemptRepository.findById(attempt.getId()).orElseThrow();
+        assertThat(receiptByEventKey("checkout-late-event").getClassification())
+                .isEqualTo(PaymentReceiptClassification.LATE);
+        assertThat(captured.getStatus()).isEqualTo(PaymentAttemptStatus.SUCCESS);
+        assertThat(reviewed.getStatus()).isEqualTo(OrderStatus.MANUAL_REVIEW);
+        assertThat(reviewed.getPaymentStatus()).isEqualTo(PaymentStatus.PENDING);
+        assertThat(reviewed.getFundedAt()).isNull();
+        verify(shippingProvider, never()).arrangePickup(anyString(), anyString());
+    }
+
+    @Test
     void dvaTransferCreditsWalletWhileCheckoutOrdersArePayable() {
         User vendor = createCreator("checkout-top-up-vendor@example.com", "2140202020");
         PaymentFixture checkout = createAwaitingPaymentFixture(vendor, OrderFundingMode.PAYSTACK_CHECKOUT);
@@ -448,7 +614,7 @@ class PaymentReconciliationAndSettlementIntegrationTest {
         assertThat(receiptByEventKey("checkout-retry-first-event").getClassification())
                 .isEqualTo(PaymentReceiptClassification.MATCHED);
         assertThat(receiptByEventKey("checkout-retry-replacement-event").getClassification())
-                .isEqualTo(PaymentReceiptClassification.DUPLICATE);
+                .isEqualTo(PaymentReceiptClassification.LATE);
         assertThat(paymentAttemptRepository.findById(replacement.getId()).orElseThrow().getStatus())
                 .isEqualTo(PaymentAttemptStatus.SUCCESS);
         assertThat(receiptRepository.count()).isEqualTo(3);
@@ -539,9 +705,12 @@ class PaymentReconciliationAndSettlementIntegrationTest {
         orderRepository.save(order);
         when(shippingProvider.trackShipment(fixture.shipment().getProviderShipmentId()))
                 .thenReturn(new ShipmentTrackingStatus(
+                        fixture.shipment().getProviderShipmentId(),
                         ShipmentStatus.CONFIRMED,
-                        FUNDED_AT.plusSeconds(60),
-                        List.of()
+                        fixture.shipment().getProviderUpdatedAt().plusSeconds(60),
+                        List.of(),
+                        null,
+                        null
                 ));
 
         fundedListener.reconcileShippingBookings();
@@ -551,6 +720,104 @@ class PaymentReconciliationAndSettlementIntegrationTest {
         assertThat(shipmentRepository.findById(fixture.shipment().getId()).orElseThrow().getStatus())
                 .isEqualTo(ShipmentStatus.CONFIRMED);
         verify(shippingProvider, never()).arrangePickup(anyString(), anyString());
+    }
+
+    @Test
+    void shipmentBookingPreflightDoesNotAdvanceFromStaleRemoteSuccess() {
+        User creator = createCreator("shipping-stale-preflight@example.com", "2121212124");
+        PaymentFixture fixture = createAwaitingPaymentFixture(creator);
+        Order order = fixture.order();
+        order.setPaymentStatus(PaymentStatus.CONFIRMED);
+        order.setStatus(OrderStatus.SHIPMENT_BOOKING);
+        orderRepository.save(order);
+        when(shippingProvider.trackShipment(fixture.shipment().getProviderShipmentId()))
+                .thenReturn(new ShipmentTrackingStatus(
+                        fixture.shipment().getProviderShipmentId(),
+                        ShipmentStatus.CONFIRMED,
+                        fixture.shipment().getProviderUpdatedAt().minusSeconds(60),
+                        List.of(),
+                        null,
+                        null
+                ));
+
+        fundedListener.reconcileShippingBookings();
+
+        assertThat(orderRepository.findById(order.getId()).orElseThrow().getStatus())
+                .isEqualTo(OrderStatus.SHIPMENT_BOOKING);
+        OrderShipment deferred = shipmentRepository.findById(fixture.shipment().getId()).orElseThrow();
+        assertThat(deferred.getStatus()).isEqualTo(ShipmentStatus.DRAFT);
+        assertThat(deferred.getNextBookingAttemptAt()).isAfter(Instant.now());
+        verify(shippingProvider, never()).arrangePickup(anyString(), anyString());
+    }
+
+    @Test
+    void shipmentBookingPreflightDoesNotAdvanceFromEqualTimestampConflict() {
+        User creator = createCreator("shipping-equal-preflight@example.com", "2121212127");
+        PaymentFixture fixture = createAwaitingPaymentFixture(creator);
+        Order order = fixture.order();
+        order.setPaymentStatus(PaymentStatus.CONFIRMED);
+        order.setStatus(OrderStatus.SHIPMENT_BOOKING);
+        orderRepository.save(order);
+        when(shippingProvider.trackShipment(fixture.shipment().getProviderShipmentId()))
+                .thenReturn(new ShipmentTrackingStatus(
+                        fixture.shipment().getProviderShipmentId(),
+                        ShipmentStatus.CONFIRMED,
+                        fixture.shipment().getProviderUpdatedAt(),
+                        List.of(),
+                        null,
+                        null
+                ));
+
+        fundedListener.reconcileShippingBookings();
+
+        assertThat(orderRepository.findById(order.getId()).orElseThrow().getStatus())
+                .isEqualTo(OrderStatus.SHIPMENT_BOOKING);
+        assertThat(shipmentRepository.findById(fixture.shipment().getId()).orElseThrow().getStatus())
+                .isEqualTo(ShipmentStatus.DRAFT);
+        verify(shippingProvider, never()).arrangePickup(anyString(), anyString());
+    }
+
+    @Test
+    @WithMockUser(username = BUYER_CREATOR_EMAIL, roles = "USER")
+    void manualTrackingRefreshSynchronizesFailureAndRecoveryWithOrderStatus() {
+        User creator = createCreator(BUYER_CREATOR_EMAIL, "2121212125");
+        PaymentFixture fixture = createAwaitingPaymentFixture(creator);
+        Order order = fixture.order();
+        order.setPaymentStatus(PaymentStatus.CONFIRMED);
+        order.setStatus(OrderStatus.READY_FOR_DELIVERY);
+        orderRepository.save(order);
+        OrderShipment shipment = fixture.shipment();
+        shipment.setStatus(ShipmentStatus.CONFIRMED);
+        shipmentRepository.save(shipment);
+        when(shippingProvider.trackShipment(shipment.getProviderShipmentId()))
+                .thenReturn(new ShipmentTrackingStatus(
+                        shipment.getProviderShipmentId(),
+                        ShipmentStatus.FAILED,
+                        shipment.getProviderUpdatedAt().plusSeconds(60),
+                        List.of(),
+                        null,
+                        null
+                ));
+
+        shippingService.refreshTracking(order.getId());
+
+        assertThat(orderRepository.findById(order.getId()).orElseThrow().getStatus())
+                .isEqualTo(OrderStatus.SHIPPING_FAILED);
+
+        when(shippingProvider.trackShipment(shipment.getProviderShipmentId()))
+                .thenReturn(new ShipmentTrackingStatus(
+                        shipment.getProviderShipmentId(),
+                        ShipmentStatus.CONFIRMED,
+                        shipment.getProviderUpdatedAt().plusSeconds(120),
+                        List.of(),
+                        null,
+                        null
+                ));
+
+        shippingService.refreshTracking(order.getId());
+
+        assertThat(orderRepository.findById(order.getId()).orElseThrow().getStatus())
+                .isEqualTo(OrderStatus.READY_FOR_DELIVERY);
     }
 
     @Test
@@ -574,6 +841,14 @@ class PaymentReconciliationAndSettlementIntegrationTest {
             }
         }
 
+        assertThat(orderRepository.findById(order.getId()).orElseThrow().getStatus())
+                .isEqualTo(OrderStatus.SHIPPING_FAILED);
+        OrderShipment finalVerification = shipmentRepository.findById(fixture.shipment().getId())
+                .orElseThrow();
+        finalVerification.setNextBookingAttemptAt(Instant.now().minusSeconds(1));
+        shipmentRepository.save(finalVerification);
+        shippingService.arrangePickup(order.getId());
+
         Order escalated = orderRepository.findById(order.getId()).orElseThrow();
         OrderShipment failed = shipmentRepository.findById(fixture.shipment().getId()).orElseThrow();
         assertThat(escalated.getStatus()).isEqualTo(OrderStatus.MANUAL_REVIEW);
@@ -581,6 +856,46 @@ class PaymentReconciliationAndSettlementIntegrationTest {
         assertThat(failed.getNextBookingAttemptAt()).isNull();
         assertThat(failed.getFailureReason()).isNotBlank();
         verify(shippingProvider, times(5)).arrangePickup(anyString(), anyString());
+    }
+
+    @Test
+    void finalShipmentBookingFailureGetsOneCarrierStateCheckBeforeManualReview() {
+        User creator = createCreator("shipping-final-verification@example.com", "2121212126");
+        PaymentFixture fixture = createAwaitingPaymentFixture(creator);
+        Order order = fixture.order();
+        order.setPaymentStatus(PaymentStatus.CONFIRMED);
+        order.setStatus(OrderStatus.SHIPMENT_BOOKING);
+        orderRepository.save(order);
+        OrderShipment shipment = fixture.shipment();
+        shipment.setBookingAttempt(4);
+        shipmentRepository.save(shipment);
+        when(shippingProvider.arrangePickup(anyString(), anyString()))
+                .thenThrow(new BusinessException("ambiguous final booking failure"));
+
+        shippingService.arrangePickup(order.getId());
+
+        assertThat(orderRepository.findById(order.getId()).orElseThrow().getStatus())
+                .isEqualTo(OrderStatus.SHIPPING_FAILED);
+        when(shippingProvider.trackShipment(shipment.getProviderShipmentId()))
+                .thenReturn(new ShipmentTrackingStatus(
+                        shipment.getProviderShipmentId(),
+                        ShipmentStatus.CONFIRMED,
+                        shipment.getProviderUpdatedAt().plusSeconds(60),
+                        List.of(),
+                        null,
+                        null
+                ));
+        OrderShipment finalVerification = shipmentRepository.findById(shipment.getId()).orElseThrow();
+        finalVerification.setNextBookingAttemptAt(Instant.now().minusSeconds(1));
+        shipmentRepository.save(finalVerification);
+
+        shippingService.arrangePickup(order.getId());
+
+        assertThat(orderRepository.findById(order.getId()).orElseThrow().getStatus())
+                .isEqualTo(OrderStatus.READY_FOR_DELIVERY);
+        assertThat(shipmentRepository.findById(shipment.getId()).orElseThrow().getStatus())
+                .isEqualTo(ShipmentStatus.CONFIRMED);
+        verify(shippingProvider, times(1)).arrangePickup(anyString(), anyString());
     }
 
     @Test
@@ -600,9 +915,12 @@ class PaymentReconciliationAndSettlementIntegrationTest {
 
         when(shippingProvider.trackShipment(fixture.shipment().getProviderShipmentId()))
                 .thenReturn(new ShipmentTrackingStatus(
+                        fixture.shipment().getProviderShipmentId(),
                         ShipmentStatus.CONFIRMED,
-                        FUNDED_AT.plusSeconds(60),
-                        List.of()
+                        Instant.now().plusSeconds(60),
+                        List.of(),
+                        null,
+                        null
                 ));
         OrderShipment retryable = shipmentRepository.findById(fixture.shipment().getId()).orElseThrow();
         retryable.setNextBookingAttemptAt(Instant.now().minusSeconds(1));
@@ -1001,6 +1319,65 @@ class PaymentReconciliationAndSettlementIntegrationTest {
     }
 
     @Test
+    void guestBuyerConfirmationUsesFrozenVendorPayoutOutsideTheDatabaseTransaction() {
+        User vendor = createCreator("vendor.external@example.com", "7878787878");
+        Order order = createOrder(vendor, CreatorRole.VENDOR, OrderStatus.READY_FOR_DELIVERY,
+                PaymentStatus.CONFIRMED);
+        order.setVendorPayoutRecipientCode("RCP_VENDOR_FROZEN");
+        order.setVendorBankAccountLast4("4321");
+        order = orderRepository.saveAndFlush(order);
+        Long orderId = order.getId();
+        createShipment(order, ShipmentStatus.CONFIRMED);
+        OrderCounterparty buyer = createVerifiedCounterparty(order, "RCP_LEGACY_COUNTERPARTY");
+        GuestOrderAccessService.IssuedGuestToken guestToken = guestAccessService.issue(order, buyer);
+        AtomicReference<String> deliveredOtp = new AtomicReference<>();
+        doAnswer(invocation -> {
+            deliveredOtp.set(extractOtp(invocation.getArgument(1, String.class)));
+            return null;
+        }).when(smsProvider).sendMessage(
+                org.mockito.ArgumentMatchers.eq(buyer.getPhoneNumber()),
+                org.mockito.ArgumentMatchers.contains("Use it to confirm delivery")
+        );
+        when(payoutProvider.initiatePayout(any(PayoutRequest.class))).thenAnswer(invocation -> {
+            assertThat(org.springframework.transaction.support.TransactionSynchronizationManager
+                    .isActualTransactionActive()).isFalse();
+            PayoutRequest request = invocation.getArgument(0, PayoutRequest.class);
+            assertThat(settlementRepository.findByOrder_Id(orderId)).isPresent();
+            return new PayoutResponse("TRF_GUEST_PENDING", request.reference(), PayoutStatus.PENDING);
+        });
+
+        OtpChallengeResponse challenge = settlementService.requestGuestDeliveryOtp(
+                order.getShareToken(),
+                guestToken.token()
+        );
+        String idempotencyKey = "vendor-external-delivery-confirmation";
+        DeliveryConfirmationResponse first = settlementService.confirmGuestDelivery(
+                order.getShareToken(),
+                guestToken.token(),
+                challenge.challengeId(),
+                deliveredOtp.get(),
+                idempotencyKey
+        );
+        DeliveryConfirmationResponse replay = settlementService.confirmGuestDelivery(
+                order.getShareToken(),
+                guestToken.token(),
+                challenge.challengeId(),
+                deliveredOtp.get(),
+                idempotencyKey
+        );
+
+        ArgumentCaptor<PayoutRequest> payoutRequest = ArgumentCaptor.forClass(PayoutRequest.class);
+        verify(payoutProvider).initiatePayout(payoutRequest.capture());
+        assertThat(payoutRequest.getValue().recipientId()).isEqualTo("RCP_VENDOR_FROZEN");
+        assertThat(payoutRequest.getValue().amount()).isEqualByComparingTo(ITEM_AMOUNT);
+        assertThat(first.status()).isEqualTo(OrderStatus.PAYOUT_PENDING);
+        assertThat(replay.status()).isEqualTo(OrderStatus.PAYOUT_PENDING);
+        assertThat(settlementRepository.findByOrder_Id(order.getId()).orElseThrow().getSettlementType())
+                .isEqualTo(SettlementType.EXTERNAL_PAYOUT);
+        assertThat(walletTransactionRepository.count()).isZero();
+    }
+
+    @Test
     @WithMockUser(username = BUYER_CREATOR_EMAIL, roles = "USER")
     void buyerCreatorConfirmationPaysOnlyItemAmountAndSuccessCompletesSettlement() {
         User buyer = createCreator(BUYER_CREATOR_EMAIL, "8888888888");
@@ -1044,6 +1421,9 @@ class PaymentReconciliationAndSettlementIntegrationTest {
                 dispatched.reference(),
                 "TRF_PENDING",
                 PayoutStatus.SUCCESS,
+                ITEM_AMOUNT,
+                CURRENCY,
+                "RCP_VENDOR_PENDING",
                 payoutOccurredAt,
                 true
         );
@@ -1125,29 +1505,138 @@ class PaymentReconciliationAndSettlementIntegrationTest {
 
     @Test
     @WithMockUser(username = BUYER_CREATOR_EMAIL, roles = "USER")
-    void failedPayoutIsRetriedWithANewProviderReference() {
+    void mismatchedProviderReferenceStopsAutomationAndPreservesBothReferences() {
+        User buyer = createCreator(BUYER_CREATOR_EMAIL, "9090909090");
+        Order order = createOrder(buyer, CreatorRole.BUYER, OrderStatus.READY_FOR_DELIVERY,
+                PaymentStatus.CONFIRMED);
+        createShipment(order, ShipmentStatus.CONFIRMED);
+        createVerifiedCounterparty(order, "RCP_VENDOR_MISMATCH");
+        when(payoutProvider.initiatePayout(any(PayoutRequest.class))).thenReturn(new PayoutResponse(
+                "TRF_UNEXPECTED",
+                "unexpected-provider-reference",
+                PayoutStatus.PENDING
+        ));
+
+        DeliveryConfirmationResponse response = settlementService.confirmCreatorDelivery(
+                order.getId(),
+                "buyer-delivery-mismatched-reference"
+        );
+
+        OrderSettlement settlement = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
+        assertThat(response.settlementStatus()).isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(settlement.getPayoutReference())
+                .isEqualTo("shopsecure_order_" + order.getId() + "_payout");
+        assertThat(settlement.getUnexpectedPayoutReference()).isEqualTo("unexpected-provider-reference");
+        assertThat(settlement.getUnexpectedTransferId()).isEqualTo("TRF_UNEXPECTED");
+        assertThat(settlement.getStatus()).isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(settlement.getNextReconciliationAt()).isNull();
+        assertThat(settlement.getReconciliationToken()).isNull();
+
+        settlementService.reconcileAutomatedPayouts();
+        verify(payoutProvider, times(1)).initiatePayout(any(PayoutRequest.class));
+    }
+
+    @Test
+    @WithMockUser(username = BUYER_CREATOR_EMAIL, roles = "USER")
+    void orderInitiationCannotReuseAWalletWithdrawalTransferId() {
+        User buyer = createCreator(BUYER_CREATOR_EMAIL, "2727272727");
+        Order order = createOrder(buyer, CreatorRole.BUYER, OrderStatus.READY_FOR_DELIVERY,
+                PaymentStatus.CONFIRMED);
+        createShipment(order, ShipmentStatus.CONFIRMED);
+        createVerifiedCounterparty(order, "RCP_CROSS_DIRECT");
+        Instant now = Instant.now();
+        Wallet wallet = walletRepository.findByUser_Id(buyer.getId()).orElseThrow();
+        withdrawalRepository.saveAndFlush(WalletWithdrawal.builder()
+                .wallet(wallet)
+                .amount(ITEM_AMOUNT)
+                .currency(CURRENCY)
+                .status(WalletWithdrawalStatus.PENDING)
+                .idempotencyKey("wallet-transfer-owner")
+                .reference("wallet-cross-direct-reference")
+                .transferId("TRF_CROSS_DIRECT")
+                .payoutRecipientCode("RCP_CROSS_DIRECT")
+                .accountNumberLast4("6789")
+                .bankName("Test Bank")
+                .accountName("Test Vendor")
+                .dispatchAttempt(1)
+                .createdAt(now)
+                .updatedAt(now)
+                .build());
+        when(payoutProvider.initiatePayout(any(PayoutRequest.class))).thenAnswer(invocation -> {
+            PayoutRequest request = invocation.getArgument(0, PayoutRequest.class);
+            return new PayoutResponse(
+                    "TRF_CROSS_DIRECT",
+                    request.reference(),
+                    PayoutStatus.SUCCESS,
+                    request.amount(),
+                    CURRENCY,
+                    request.recipientId()
+            );
+        });
+
+        DeliveryConfirmationResponse response = settlementService.confirmCreatorDelivery(
+                order.getId(),
+                "cross-domain-direct-transfer"
+        );
+
+        OrderSettlement settlement = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
+        assertThat(response.settlementStatus()).isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(settlement.getStatus()).isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(settlement.getUnexpectedTransferId()).isEqualTo("TRF_CROSS_DIRECT");
+        assertThat(settlement.getFailureReason()).contains("already assigned to another payout");
+        assertThat(withdrawalRepository.findByTransferId("TRF_CROSS_DIRECT").orElseThrow().getStatus())
+                .isEqualTo(WalletWithdrawalStatus.PENDING);
+    }
+
+    @Test
+    @WithMockUser(username = BUYER_CREATOR_EMAIL, roles = "USER")
+    void definitiveProviderRejectionStopsAutomationForManualReview() {
+        User buyer = createCreator(BUYER_CREATOR_EMAIL, "9191919191");
+        Order order = createOrder(buyer, CreatorRole.BUYER, OrderStatus.READY_FOR_DELIVERY,
+                PaymentStatus.CONFIRMED);
+        createShipment(order, ShipmentStatus.CONFIRMED);
+        createVerifiedCounterparty(order, "RCP_VENDOR_REJECTED");
+        when(payoutProvider.initiatePayout(any(PayoutRequest.class)))
+                .thenThrow(new PayoutRejectedException());
+
+        DeliveryConfirmationResponse response = settlementService.confirmCreatorDelivery(
+                order.getId(),
+                "buyer-delivery-provider-rejected"
+        );
+
+        OrderSettlement settlement = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
+        assertThat(response.settlementStatus()).isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(settlement.getStatus()).isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(settlement.getFailureReason()).contains("definitively rejected");
+        assertThat(settlement.getPayoutAttempt()).isEqualTo(1);
+        assertThat(settlement.getNextReconciliationAt()).isNull();
+        assertThat(settlement.getReconciliationToken()).isNull();
+
+        settlementService.reconcileAutomatedPayouts();
+        verify(payoutProvider, times(1)).initiatePayout(any(PayoutRequest.class));
+    }
+
+    @Test
+    @WithMockUser(username = BUYER_CREATOR_EMAIL, roles = "USER")
+    void confirmedFailedPayoutStopsAutomationWithoutCreatingANewReference() {
         User buyer = createCreator(BUYER_CREATOR_EMAIL, "9797979797");
         Order order = createOrder(buyer, CreatorRole.BUYER, OrderStatus.READY_FOR_DELIVERY,
                 PaymentStatus.CONFIRMED);
         createShipment(order, ShipmentStatus.CONFIRMED);
         createVerifiedCounterparty(order, "RCP_VENDOR_RETRY");
-        AtomicInteger dispatches = new AtomicInteger();
         when(payoutProvider.initiatePayout(any(PayoutRequest.class))).thenAnswer(invocation -> {
             PayoutRequest request = invocation.getArgument(0, PayoutRequest.class);
-            int attempt = dispatches.incrementAndGet();
-            return new PayoutResponse(
-                    "TRF_RETRY_" + attempt,
-                    request.reference(),
-                    attempt == 1 ? PayoutStatus.FAILED : PayoutStatus.PENDING
-            );
+            return new PayoutResponse("TRF_FAILED_FINAL", request.reference(), PayoutStatus.PENDING);
         });
 
         settlementService.confirmCreatorDelivery(order.getId(), "buyer-delivery-retry");
-        var failed = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
-        String firstReference = failed.getPayoutReference();
-        when(payoutProvider.verifyPayout(firstReference)).thenReturn(new PayoutStatusUpdatedEvent(
-                firstReference,
-                "TRF_RETRY_1",
+        var pending = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
+        String reference = pending.getPayoutReference();
+        pending.setNextReconciliationAt(Instant.now().minusSeconds(1));
+        settlementRepository.saveAndFlush(pending);
+        when(payoutProvider.verifyPayout(reference)).thenReturn(new PayoutStatusUpdatedEvent(
+                reference,
+                "TRF_FAILED_FINAL",
                 PayoutStatus.FAILED,
                 FUNDED_AT.plusSeconds(600),
                 true
@@ -1155,26 +1644,126 @@ class PaymentReconciliationAndSettlementIntegrationTest {
 
         settlementService.reconcileAutomatedPayouts();
 
-        Order retrying = orderRepository.findById(order.getId()).orElseThrow();
-        var retried = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
-        assertThat(retried.getPayoutAttempt()).isEqualTo(2);
-        assertThat(retried.getPayoutReference()).isNotEqualTo(firstReference);
-        assertThat(retried.getPayoutReference()).endsWith("_2");
-        assertThat(retried.getTransferId()).isEqualTo("TRF_RETRY_2");
-        assertThat(retried.getStatus()).isEqualTo(SettlementStatus.PENDING);
-        assertThat(retrying.getStatus()).isEqualTo(OrderStatus.PAYOUT_PENDING);
-        assertThat(retrying.getSettlementStatus()).isEqualTo(SettlementStatus.PENDING);
-        verify(payoutProvider, times(2)).initiatePayout(any(PayoutRequest.class));
+        Order requiresReview = orderRepository.findById(order.getId()).orElseThrow();
+        var failed = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
+        assertThat(failed.getPayoutAttempt()).isEqualTo(1);
+        assertThat(failed.getPayoutReference()).isEqualTo(reference);
+        assertThat(failed.getTransferId()).isEqualTo("TRF_FAILED_FINAL");
+        assertThat(failed.getStatus()).isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(failed.getNextReconciliationAt()).isNull();
+        assertThat(failed.getReconciliationToken()).isNull();
+        assertThat(requiresReview.getStatus()).isEqualTo(OrderStatus.PAYOUT_PENDING);
+        assertThat(requiresReview.getSettlementStatus()).isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        verify(payoutProvider, times(1)).initiatePayout(any(PayoutRequest.class));
     }
 
     @Test
-    void malformedPayoutDoesNotAbortTheRemainingReconciliationBatch() {
+    void mismatchedVerificationReferenceStopsAutomationAndPreservesProviderIdentity() {
+        User creator = createCreator("payout-verification-reference@example.com", "9495959595");
+        Order order = createOrder(creator, CreatorRole.BUYER, OrderStatus.PAYOUT_PENDING,
+                PaymentStatus.CONFIRMED);
+        order.setVendorPayoutRecipientCode("RCP_VERIFY_REFERENCE");
+        order = orderRepository.save(order);
+        String expectedReference = "shopsecure_order_" + order.getId() + "_verify_reference";
+        Instant now = Instant.now().minusSeconds(5);
+        settlementRepository.saveAndFlush(OrderSettlement.builder()
+                .order(order)
+                .settlementType(SettlementType.EXTERNAL_PAYOUT)
+                .amount(ITEM_AMOUNT)
+                .status(SettlementStatus.PENDING)
+                .idempotencyKey("verify-reference")
+                .payoutReference(expectedReference)
+                .transferId("TRF_EXPECTED")
+                .nextReconciliationAt(now)
+                .payoutAttempt(1)
+                .createdAt(now)
+                .updatedAt(now)
+                .build());
+        when(payoutProvider.verifyPayout(expectedReference)).thenReturn(new PayoutStatusUpdatedEvent(
+                "unexpected-verification-reference",
+                "TRF_UNEXPECTED_VERIFY",
+                PayoutStatus.PENDING,
+                Instant.now(),
+                true
+        ));
+
+        settlementService.reconcileAutomatedPayouts();
+
+        OrderSettlement settlement = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
+        assertThat(settlement.getStatus()).isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(settlement.getUnexpectedPayoutReference()).isEqualTo("unexpected-verification-reference");
+        assertThat(settlement.getUnexpectedTransferId()).isEqualTo("TRF_UNEXPECTED_VERIFY");
+        assertThat(settlement.getNextReconciliationAt()).isNull();
+        assertThat(settlement.getReconciliationToken()).isNull();
+        assertThat(orderRepository.findById(order.getId()).orElseThrow().getSettlementStatus())
+                .isEqualTo(SettlementStatus.REQUIRES_ACTION);
+    }
+
+    @ParameterizedTest(name = "successful payout with wrong {3} requires review")
+    @CsvSource({
+            "124999.99, NGN, RCP_EXACT_PAYOUT, amount",
+            "125000.00, USD, RCP_EXACT_PAYOUT, currency",
+            "125000.00, NGN, RCP_OTHER_RECIPIENT, recipient"
+    })
+    void successfulPayoutRequiresExactFrozenDetails(
+            String amount,
+            String currency,
+            String recipient,
+            String mismatchField
+    ) {
+        User creator = createCreator(
+                "payout-exact-" + mismatchField + "@example.com",
+                "2323232323"
+        );
+        Order order = createOrder(creator, CreatorRole.BUYER, OrderStatus.PAYOUT_PENDING,
+                PaymentStatus.CONFIRMED);
+        order.setVendorPayoutRecipientCode("RCP_EXACT_PAYOUT");
+        order = orderRepository.save(order);
+        String reference = "shopsecure_order_" + order.getId() + "_exact_payout";
+        Instant now = Instant.now();
+        settlementRepository.saveAndFlush(OrderSettlement.builder()
+                .order(order)
+                .settlementType(SettlementType.EXTERNAL_PAYOUT)
+                .amount(ITEM_AMOUNT)
+                .status(SettlementStatus.PENDING)
+                .idempotencyKey("exact-payout-" + mismatchField)
+                .payoutReference(reference)
+                .transferId("TRF_EXACT_PAYOUT")
+                .payoutAttempt(1)
+                .createdAt(now)
+                .updatedAt(now)
+                .build());
+
+        settlementService.applyPayoutStatus(new PayoutStatusUpdatedEvent(
+                reference,
+                "TRF_EXACT_PAYOUT",
+                PayoutStatus.SUCCESS,
+                new BigDecimal(amount),
+                currency,
+                recipient,
+                now.plusSeconds(1),
+                true
+        ));
+
+        OrderSettlement settlement = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
+        assertThat(settlement.getStatus()).isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(settlement.getFailureReason()).containsIgnoringCase(mismatchField);
+        assertThat(settlement.getCompletedAt()).isNull();
+        assertThat(orderRepository.findById(order.getId()).orElseThrow().getSettlementStatus())
+                .isEqualTo(SettlementStatus.REQUIRES_ACTION);
+    }
+
+    @Test
+    void conflictingTransferDoesNotAbortTheRemainingReconciliationBatch() {
         User firstCreator = createCreator("payout-batch-first@example.com", "9696969696");
         User secondCreator = createCreator("payout-batch-second@example.com", "9595959595");
         Order firstOrder = createOrder(firstCreator, CreatorRole.BUYER, OrderStatus.PAYOUT_PENDING,
                 PaymentStatus.CONFIRMED);
         Order secondOrder = createOrder(secondCreator, CreatorRole.BUYER, OrderStatus.PAYOUT_PENDING,
                 PaymentStatus.CONFIRMED);
+        firstOrder.setVendorPayoutRecipientCode("RCP_BATCH_FIRST");
+        secondOrder.setVendorPayoutRecipientCode("RCP_BATCH_SECOND");
+        orderRepository.saveAll(List.of(firstOrder, secondOrder));
         String firstReference = "shopsecure_order_" + firstOrder.getId() + "_batch";
         String secondReference = "shopsecure_order_" + secondOrder.getId() + "_batch";
         Instant now = Instant.now();
@@ -1213,6 +1802,9 @@ class PaymentReconciliationAndSettlementIntegrationTest {
                 secondReference,
                 "TRF_BATCH_SECOND",
                 PayoutStatus.SUCCESS,
+                ITEM_AMOUNT,
+                CURRENCY,
+                "RCP_BATCH_SECOND",
                 now.plusSeconds(30),
                 true
         ));
@@ -1220,11 +1812,161 @@ class PaymentReconciliationAndSettlementIntegrationTest {
         settlementService.reconcileAutomatedPayouts();
 
         assertThat(settlementRepository.findByOrder_Id(firstOrder.getId()).orElseThrow().getStatus())
-                .isEqualTo(SettlementStatus.PENDING);
+                .isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(settlementRepository.findByOrder_Id(firstOrder.getId()).orElseThrow()
+                .getUnexpectedTransferId()).isEqualTo("TRF_MISMATCH");
         assertThat(settlementRepository.findByOrder_Id(secondOrder.getId()).orElseThrow().getStatus())
                 .isEqualTo(SettlementStatus.COMPLETED);
         assertThat(orderRepository.findById(secondOrder.getId()).orElseThrow().getStatus())
                 .isEqualTo(OrderStatus.COMPLETED);
+    }
+
+    @Test
+    void manualActionSettlementDoesNotConsumeTheAutomatedPayoutBatch() {
+        User firstCreator = createCreator("payout-action-first@example.com", "9494949494");
+        User secondCreator = createCreator("payout-due-second@example.com", "9393939393");
+        Order manualAction = createOrder(firstCreator, CreatorRole.BUYER, OrderStatus.PAYOUT_PENDING,
+                PaymentStatus.CONFIRMED);
+        Order due = createOrder(secondCreator, CreatorRole.BUYER, OrderStatus.PAYOUT_PENDING,
+                PaymentStatus.CONFIRMED);
+        due.setVendorPayoutRecipientCode("RCP_DUE_SECOND");
+        due = orderRepository.save(due);
+        Instant now = Instant.now().minusSeconds(5);
+        manualAction.setSettlementStatus(SettlementStatus.REQUIRES_ACTION);
+        orderRepository.save(manualAction);
+        settlementRepository.save(OrderSettlement.builder()
+                .order(manualAction)
+                .settlementType(SettlementType.EXTERNAL_PAYOUT)
+                .amount(ITEM_AMOUNT)
+                .status(SettlementStatus.REQUIRES_ACTION)
+                .idempotencyKey("manual-action-first")
+                .payoutReference("shopsecure_order_" + manualAction.getId() + "_manual_action")
+                .failureReason("Manual recipient remediation required")
+                .createdAt(now)
+                .updatedAt(now)
+                .build());
+        String dueReference = "shopsecure_order_" + due.getId() + "_due";
+        settlementRepository.save(OrderSettlement.builder()
+                .order(due)
+                .settlementType(SettlementType.EXTERNAL_PAYOUT)
+                .amount(ITEM_AMOUNT)
+                .status(SettlementStatus.PENDING)
+                .idempotencyKey("due-second")
+                .payoutReference(dueReference)
+                .transferId("TRF_DUE_SECOND")
+                .nextReconciliationAt(now)
+                .payoutAttempt(1)
+                .createdAt(now)
+                .updatedAt(now)
+                .build());
+        when(payoutProvider.verifyPayout(dueReference)).thenReturn(new PayoutStatusUpdatedEvent(
+                dueReference,
+                "TRF_DUE_SECOND",
+                PayoutStatus.SUCCESS,
+                ITEM_AMOUNT,
+                CURRENCY,
+                "RCP_DUE_SECOND",
+                Instant.now(),
+                true
+        ));
+
+        Object originalBatchSize = ReflectionTestUtils.getField(
+                settlementService,
+                "payoutReconciliationBatchSize"
+        );
+        try {
+            ReflectionTestUtils.setField(settlementService, "payoutReconciliationBatchSize", 1);
+            settlementService.reconcileAutomatedPayouts();
+        } finally {
+            ReflectionTestUtils.setField(settlementService, "payoutReconciliationBatchSize", originalBatchSize);
+        }
+
+        assertThat(settlementRepository.findByOrder_Id(manualAction.getId()).orElseThrow().getStatus())
+                .isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(settlementRepository.findByOrder_Id(due.getId()).orElseThrow().getStatus())
+                .isEqualTo(SettlementStatus.COMPLETED);
+        verify(payoutProvider).verifyPayout(dueReference);
+    }
+
+    @Test
+    void unresolvedPayoutIsLeasedBeforeAnotherReconciliationCycle() {
+        User creator = createCreator("payout-lease@example.com", "9292929292");
+        Order order = createOrder(creator, CreatorRole.BUYER, OrderStatus.PAYOUT_PENDING,
+                PaymentStatus.CONFIRMED);
+        Instant now = Instant.now().minusSeconds(5);
+        String reference = "shopsecure_order_" + order.getId() + "_lease";
+        settlementRepository.save(OrderSettlement.builder()
+                .order(order)
+                .settlementType(SettlementType.EXTERNAL_PAYOUT)
+                .amount(ITEM_AMOUNT)
+                .status(SettlementStatus.PENDING)
+                .idempotencyKey("payout-lease")
+                .payoutReference(reference)
+                .transferId("TRF_PAYOUT_LEASE")
+                .nextReconciliationAt(now)
+                .payoutAttempt(1)
+                .createdAt(now)
+                .updatedAt(now)
+                .build());
+        when(payoutProvider.verifyPayout(reference)).thenReturn(null);
+
+        settlementService.reconcileAutomatedPayouts();
+        settlementService.reconcileAutomatedPayouts();
+
+        OrderSettlement leased = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
+        assertThat(leased.getNextReconciliationAt()).isAfter(Instant.now());
+        verify(payoutProvider, times(1)).verifyPayout(reference);
+    }
+
+    @Test
+    void concurrentReconciliationWorkersDispatchOneClaimedPayout() throws Exception {
+        User creator = createCreator("payout-concurrent-claim@example.com", "2121212121");
+        Order order = createOrder(creator, CreatorRole.BUYER, OrderStatus.PAYOUT_PENDING,
+                PaymentStatus.CONFIRMED);
+        createVerifiedCounterparty(order, "RCP_CONCURRENT_CLAIM");
+        Instant now = Instant.now().minusSeconds(5);
+        String reference = "shopsecure_order_" + order.getId() + "_concurrent_claim";
+        settlementRepository.saveAndFlush(OrderSettlement.builder()
+                .order(order)
+                .settlementType(SettlementType.EXTERNAL_PAYOUT)
+                .amount(ITEM_AMOUNT)
+                .status(SettlementStatus.PENDING)
+                .idempotencyKey("concurrent-claim")
+                .payoutReference(reference)
+                .nextReconciliationAt(now)
+                .payoutAttempt(1)
+                .createdAt(now)
+                .updatedAt(now)
+                .build());
+        CountDownLatch firstWorkerVerifying = new CountDownLatch(1);
+        CountDownLatch releaseFirstWorker = new CountDownLatch(1);
+        when(payoutProvider.verifyPayout(reference)).thenAnswer(invocation -> {
+            firstWorkerVerifying.countDown();
+            assertThat(releaseFirstWorker.await(5, TimeUnit.SECONDS)).isTrue();
+            return null;
+        });
+        when(payoutProvider.initiatePayout(any(PayoutRequest.class))).thenAnswer(invocation -> {
+            PayoutRequest request = invocation.getArgument(0, PayoutRequest.class);
+            return new PayoutResponse("TRF_CONCURRENT_CLAIM", request.reference(), PayoutStatus.PENDING);
+        });
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> first = workers.submit(settlementService::reconcileAutomatedPayouts);
+            assertThat(firstWorkerVerifying.await(5, TimeUnit.SECONDS)).isTrue();
+            Future<?> second = workers.submit(settlementService::reconcileAutomatedPayouts);
+            second.get(5, TimeUnit.SECONDS);
+            releaseFirstWorker.countDown();
+            first.get(5, TimeUnit.SECONDS);
+        } finally {
+            releaseFirstWorker.countDown();
+            workers.shutdownNow();
+        }
+
+        verify(payoutProvider, times(1)).verifyPayout(reference);
+        verify(payoutProvider, times(1)).initiatePayout(any(PayoutRequest.class));
+        OrderSettlement settlement = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
+        assertThat(settlement.getTransferId()).isEqualTo("TRF_CONCURRENT_CLAIM");
+        assertThat(settlement.getReconciliationToken()).isNull();
     }
 
     @Test
@@ -1284,13 +2026,13 @@ class PaymentReconciliationAndSettlementIntegrationTest {
                         new ShipmentStatusUpdatedEvent(
                                 vendorShipment.getProviderShipmentId(),
                                 ShipmentStatus.DELIVERED,
-                                FUNDED_AT.plusSeconds(1000),
+                                vendorShipment.getProviderUpdatedAt().plusSeconds(1),
                                 true
                         ),
                         new ShipmentStatusUpdatedEvent(
                                 buyerShipment.getProviderShipmentId(),
                                 ShipmentStatus.DELIVERED,
-                                FUNDED_AT.plusSeconds(1001),
+                                buyerShipment.getProviderUpdatedAt().plusSeconds(1),
                                 true
                         )
                 );
@@ -1313,6 +2055,378 @@ class PaymentReconciliationAndSettlementIntegrationTest {
         assertThat(walletRepository.findByUser_Id(vendorCreator.getId()).orElseThrow().getBalance())
                 .isEqualByComparingTo("0.00");
         assertThat(processedWebhookRepository.count()).isEqualTo(2);
+        verify(payoutProvider, never()).initiatePayout(any(PayoutRequest.class));
+    }
+
+    @ParameterizedTest(name = "{0}-created new order pays vendor after carrier pickup")
+    @EnumSource(CreatorRole.class)
+    void carrierPickupQueuesOneExternalBankPayoutForNewOrders(CreatorRole creatorRole) {
+        User creator = createCreator(
+                "pickup-" + creatorRole.name().toLowerCase() + "@example.com",
+                creatorRole == CreatorRole.BUYER ? "1313131313" : "1414141414"
+        );
+        Order order = createOrder(
+                creator,
+                creatorRole,
+                OrderStatus.READY_FOR_DELIVERY,
+                PaymentStatus.CONFIRMED
+        );
+        order.setEscrowReleasePolicy(EscrowReleasePolicy.CARRIER_PICKUP);
+        order.setVendorPayoutRecipientCode("RCP_PICKUP_" + creatorRole.name());
+        order = orderRepository.saveAndFlush(order);
+        createVerifiedCounterparty(order, "RCP_COUNTERPARTY_" + creatorRole.name());
+        OrderShipment shipment = createShipment(order, ShipmentStatus.CONFIRMED);
+        Instant pickedUpAt = shipment.getProviderUpdatedAt().plusSeconds(1);
+        Long orderId = order.getId();
+        when(payoutProvider.initiatePayout(any(PayoutRequest.class))).thenAnswer(invocation -> {
+            assertThat(org.springframework.transaction.support.TransactionSynchronizationManager
+                    .isActualTransactionActive()).isFalse();
+            PayoutRequest request = invocation.getArgument(0, PayoutRequest.class);
+            assertThat(settlementRepository.findByOrder_Id(orderId)).isPresent();
+            return new PayoutResponse("TRF_PICKUP_" + creatorRole.name(), request.reference(), PayoutStatus.PENDING);
+        });
+
+        shippingService.applyWebhookEvent(new ShipmentStatusUpdatedEvent(
+                shipment.getProviderShipmentId(),
+                ShipmentStatus.IN_TRANSIT,
+                pickedUpAt,
+                true
+        ), "carrier-pickup-" + creatorRole.name());
+        shippingService.applyWebhookEvent(new ShipmentStatusUpdatedEvent(
+                shipment.getProviderShipmentId(),
+                ShipmentStatus.IN_TRANSIT,
+                pickedUpAt.plusSeconds(1),
+                true
+        ), "carrier-pickup-replay-" + creatorRole.name());
+
+        Order payoutPending = orderRepository.findById(orderId).orElseThrow();
+        OrderSettlement settlement = settlementRepository.findByOrder_Id(orderId).orElseThrow();
+        assertThat(payoutPending.getStatus()).isEqualTo(OrderStatus.PAYOUT_PENDING);
+        assertThat(payoutPending.getSettlementStatus()).isEqualTo(SettlementStatus.PENDING);
+        assertThat(payoutPending.getCarrierPickupConfirmedAt()).isNotNull();
+        assertThat(payoutPending.getDeliveryConfirmedAt()).isNull();
+        assertThat(settlement.getSettlementType()).isEqualTo(SettlementType.EXTERNAL_PAYOUT);
+        assertThat(settlement.getTrigger()).isEqualTo(SettlementTrigger.CARRIER_PICKUP);
+        assertThat(settlement.getAmount()).isEqualByComparingTo(ITEM_AMOUNT);
+        assertThat(settlement.getIdempotencyKey()).isEqualTo("carrier-pickup-order-" + orderId);
+        assertThat(settlementRepository.count()).isOne();
+        assertThat(walletTransactionRepository.count()).isZero();
+        verify(payoutProvider, times(1)).initiatePayout(org.mockito.ArgumentMatchers.argThat(request ->
+                request.recipientId().equals("RCP_PICKUP_" + creatorRole.name())
+                        && request.amount().compareTo(ITEM_AMOUNT) == 0
+        ));
+    }
+
+    @Test
+    void deliveredIsPickupCatchUpForANewOrderWhenInTransitWasMissed() {
+        User creator = createCreator("pickup-catchup@example.com", "1515151515");
+        Order order = createOrder(
+                creator,
+                CreatorRole.VENDOR,
+                OrderStatus.READY_FOR_DELIVERY,
+                PaymentStatus.CONFIRMED
+        );
+        order.setEscrowReleasePolicy(EscrowReleasePolicy.CARRIER_PICKUP);
+        order.setVendorPayoutRecipientCode("RCP_PICKUP_CATCHUP");
+        order = orderRepository.saveAndFlush(order);
+        createVerifiedCounterparty(order, null);
+        OrderShipment shipment = createShipment(order, ShipmentStatus.CONFIRMED);
+        when(payoutProvider.initiatePayout(any(PayoutRequest.class))).thenAnswer(invocation -> {
+            PayoutRequest request = invocation.getArgument(0, PayoutRequest.class);
+            return new PayoutResponse("TRF_PICKUP_CATCHUP", request.reference(), PayoutStatus.PENDING);
+        });
+
+        shippingService.applyWebhookEvent(new ShipmentStatusUpdatedEvent(
+                shipment.getProviderShipmentId(),
+                ShipmentStatus.DELIVERED,
+                shipment.getProviderUpdatedAt().plusSeconds(1),
+                true
+        ), "carrier-delivered-catchup");
+
+        assertThat(orderRepository.findById(order.getId()).orElseThrow().getCarrierPickupConfirmedAt())
+                .isNotNull();
+        assertThat(settlementRepository.findByOrder_Id(order.getId()).orElseThrow().getTrigger())
+                .isEqualTo(SettlementTrigger.CARRIER_PICKUP);
+        verify(payoutProvider, times(1)).initiatePayout(any(PayoutRequest.class));
+    }
+
+    @Test
+    @WithMockUser(username = BUYER_CREATOR_EMAIL, roles = "USER")
+    void trackingHistoryPickupStillQueuesPayoutWhenCurrentCarrierStateIsFailed() {
+        User buyer = createCreator(BUYER_CREATOR_EMAIL, "2424242424");
+        Order order = createOrder(
+                buyer,
+                CreatorRole.BUYER,
+                OrderStatus.READY_FOR_DELIVERY,
+                PaymentStatus.CONFIRMED
+        );
+        order.setEscrowReleasePolicy(EscrowReleasePolicy.CARRIER_PICKUP);
+        order.setVendorPayoutRecipientCode("RCP_HISTORY_PICKUP");
+        order = orderRepository.saveAndFlush(order);
+        createVerifiedCounterparty(order, "RCP_HISTORY_PICKUP");
+        OrderShipment shipment = createShipment(order, ShipmentStatus.CONFIRMED);
+        Instant pickupTime = Instant.now().minusSeconds(30);
+        Instant failureTime = pickupTime.plusSeconds(20);
+        shipment.setProviderUpdatedAt(pickupTime.minusSeconds(10));
+        shipment = shipmentRepository.saveAndFlush(shipment);
+        when(shippingProvider.trackShipment(shipment.getProviderShipmentId())).thenReturn(
+                new ShipmentTrackingStatus(
+                        shipment.getProviderShipmentId(),
+                        ShipmentStatus.FAILED,
+                        failureTime,
+                        List.of(new ShipmentTrackingCheckpoint(
+                                ShipmentStatus.IN_TRANSIT,
+                                pickupTime,
+                                "Carrier collected parcel",
+                                "Lagos"
+                        )),
+                        shipment.getTrackingReference(),
+                        shipment.getTrackingUrl()
+                )
+        );
+        when(payoutProvider.initiatePayout(any(PayoutRequest.class))).thenAnswer(invocation -> {
+            PayoutRequest request = invocation.getArgument(0, PayoutRequest.class);
+            return new PayoutResponse("TRF_HISTORY_PICKUP", request.reference(), PayoutStatus.PENDING);
+        });
+
+        shippingService.refreshTracking(order.getId());
+
+        Order manualReview = orderRepository.findById(order.getId()).orElseThrow();
+        OrderShipment failedShipment = shipmentRepository.findByOrder_Id(order.getId()).orElseThrow();
+        OrderSettlement settlement = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
+        assertThat(failedShipment.getStatus()).isEqualTo(ShipmentStatus.FAILED);
+        assertThat(manualReview.getCarrierPickupConfirmedAt()).isEqualTo(pickupTime);
+        assertThat(manualReview.getStatus()).isEqualTo(OrderStatus.MANUAL_REVIEW);
+        assertThat(manualReview.getSettlementStatus()).isEqualTo(SettlementStatus.PENDING);
+        assertThat(settlement.getTrigger()).isEqualTo(SettlementTrigger.CARRIER_PICKUP);
+        assertThat(settlement.getTriggeredAt()).isEqualTo(pickupTime);
+        verify(payoutProvider, times(1)).initiatePayout(any(PayoutRequest.class));
+    }
+
+    @Test
+    @WithMockUser(username = BUYER_CREATOR_EMAIL, roles = "USER")
+    void trackingHistoryPickupIsRetainedForAnOrderAlreadyInManualReview() {
+        User buyer = createCreator(BUYER_CREATOR_EMAIL, "2626262626");
+        Order order = createOrder(
+                buyer,
+                CreatorRole.BUYER,
+                OrderStatus.MANUAL_REVIEW,
+                PaymentStatus.CONFIRMED
+        );
+        order.setEscrowReleasePolicy(EscrowReleasePolicy.CARRIER_PICKUP);
+        order.setVendorPayoutRecipientCode("RCP_MANUAL_PICKUP");
+        order = orderRepository.saveAndFlush(order);
+        createVerifiedCounterparty(order, "RCP_MANUAL_PICKUP");
+        OrderShipment shipment = createShipment(order, ShipmentStatus.CONFIRMED);
+        Instant pickupTime = Instant.now().minusSeconds(30);
+        Instant failureTime = pickupTime.plusSeconds(20);
+        shipment.setProviderUpdatedAt(pickupTime.minusSeconds(10));
+        shipment = shipmentRepository.saveAndFlush(shipment);
+        when(shippingProvider.trackShipment(shipment.getProviderShipmentId())).thenReturn(
+                new ShipmentTrackingStatus(
+                        shipment.getProviderShipmentId(),
+                        ShipmentStatus.FAILED,
+                        failureTime,
+                        List.of(new ShipmentTrackingCheckpoint(
+                                ShipmentStatus.IN_TRANSIT,
+                                pickupTime,
+                                "Carrier collected parcel",
+                                "Lagos"
+                        )),
+                        shipment.getTrackingReference(),
+                        shipment.getTrackingUrl()
+                )
+        );
+
+        shippingService.refreshTracking(order.getId());
+
+        Order manualReview = orderRepository.findById(order.getId()).orElseThrow();
+        OrderSettlement settlement = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
+        assertThat(manualReview.getCarrierPickupConfirmedAt()).isEqualTo(pickupTime);
+        assertThat(manualReview.getStatus()).isEqualTo(OrderStatus.MANUAL_REVIEW);
+        assertThat(manualReview.getSettlementStatus()).isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(settlement.getStatus()).isEqualTo(SettlementStatus.REQUIRES_ACTION);
+        assertThat(settlement.getFailureReason()).contains("order requires manual review");
+        assertThat(settlement.getNextReconciliationAt()).isNull();
+        verify(payoutProvider, never()).initiatePayout(any(PayoutRequest.class));
+    }
+
+    @Test
+    void successfulInitiationWithoutRecipientCodeWaitsForExactPayoutVerification() {
+        User buyer = createCreator("pickup-numeric-recipient@example.com", "2525252525");
+        Order order = createOrder(
+                buyer,
+                CreatorRole.BUYER,
+                OrderStatus.READY_FOR_DELIVERY,
+                PaymentStatus.CONFIRMED
+        );
+        order.setEscrowReleasePolicy(EscrowReleasePolicy.CARRIER_PICKUP);
+        order.setVendorPayoutRecipientCode("RCP_NUMERIC_RECIPIENT");
+        order = orderRepository.saveAndFlush(order);
+        createVerifiedCounterparty(order, "RCP_NUMERIC_RECIPIENT");
+        OrderShipment shipment = createShipment(order, ShipmentStatus.CONFIRMED);
+        when(payoutProvider.initiatePayout(any(PayoutRequest.class))).thenAnswer(invocation -> {
+            PayoutRequest request = invocation.getArgument(0, PayoutRequest.class);
+            return new PayoutResponse(
+                    "TRF_NUMERIC_RECIPIENT",
+                    request.reference(),
+                    PayoutStatus.SUCCESS,
+                    request.amount(),
+                    CURRENCY,
+                    null
+            );
+        });
+
+        shippingService.applyWebhookEvent(new ShipmentStatusUpdatedEvent(
+                shipment.getProviderShipmentId(),
+                ShipmentStatus.IN_TRANSIT,
+                shipment.getProviderUpdatedAt().plusSeconds(1),
+                true
+        ), "carrier-pickup-numeric-recipient");
+
+        Order payoutPending = orderRepository.findById(order.getId()).orElseThrow();
+        OrderSettlement settlement = settlementRepository.findByOrder_Id(order.getId()).orElseThrow();
+        assertThat(payoutPending.getStatus()).isEqualTo(OrderStatus.PAYOUT_PENDING);
+        assertThat(payoutPending.getSettlementStatus()).isEqualTo(SettlementStatus.PENDING);
+        assertThat(settlement.getStatus()).isEqualTo(SettlementStatus.PENDING);
+        assertThat(settlement.getTransferId()).isEqualTo("TRF_NUMERIC_RECIPIENT");
+        assertThat(settlement.getCompletedAt()).isNull();
+    }
+
+    @Test
+    void successfulPickupPayoutKeepsOrderInTransitUntilCarrierDelivery() {
+        User creator = createCreator("pickup-success@example.com", "1717171717");
+        Order order = createOrder(
+                creator,
+                CreatorRole.BUYER,
+                OrderStatus.READY_FOR_DELIVERY,
+                PaymentStatus.CONFIRMED
+        );
+        order.setEscrowReleasePolicy(EscrowReleasePolicy.CARRIER_PICKUP);
+        order.setVendorPayoutRecipientCode("RCP_PICKUP_SUCCESS");
+        order = orderRepository.saveAndFlush(order);
+        createVerifiedCounterparty(order, "RCP_PICKUP_SUCCESS");
+        OrderShipment shipment = createShipment(order, ShipmentStatus.CONFIRMED);
+        when(payoutProvider.initiatePayout(any(PayoutRequest.class))).thenAnswer(invocation -> {
+            PayoutRequest request = invocation.getArgument(0, PayoutRequest.class);
+            return new PayoutResponse(
+                    "TRF_PICKUP_SUCCESS",
+                    request.reference(),
+                    PayoutStatus.SUCCESS,
+                    request.amount(),
+                    CURRENCY,
+                    request.recipientId()
+            );
+        });
+        Instant pickupTime = shipment.getProviderUpdatedAt().plusSeconds(1);
+
+        shippingService.applyWebhookEvent(new ShipmentStatusUpdatedEvent(
+                shipment.getProviderShipmentId(),
+                ShipmentStatus.IN_TRANSIT,
+                pickupTime,
+                true
+        ), "carrier-pickup-success");
+
+        Order inTransit = orderRepository.findById(order.getId()).orElseThrow();
+        assertThat(inTransit.getStatus()).isEqualTo(OrderStatus.IN_TRANSIT);
+        assertThat(inTransit.getSettlementStatus()).isEqualTo(SettlementStatus.COMPLETED);
+        assertThat(inTransit.getCompletedAt()).isNull();
+
+        shippingService.applyWebhookEvent(new ShipmentStatusUpdatedEvent(
+                shipment.getProviderShipmentId(),
+                ShipmentStatus.DELIVERED,
+                pickupTime.plusSeconds(60),
+                true
+        ), "carrier-delivery-after-payout");
+
+        Order completed = orderRepository.findById(order.getId()).orElseThrow();
+        assertThat(completed.getStatus()).isEqualTo(OrderStatus.COMPLETED);
+        assertThat(completed.getSettlementStatus()).isEqualTo(SettlementStatus.COMPLETED);
+        assertThat(completed.getCompletedAt()).isNotNull();
+        verify(payoutProvider, times(1)).initiatePayout(any(PayoutRequest.class));
+    }
+
+    @ParameterizedTest(name = "post-pickup carrier {0} requires manual review")
+    @EnumSource(value = ShipmentStatus.class, names = {"FAILED", "CANCELLED"})
+    void postPickupCarrierFailureDoesNotUndoOrRepeatPayout(ShipmentStatus failureStatus) {
+        User creator = createCreator(
+                "pickup-failure-" + failureStatus.name().toLowerCase() + "@example.com",
+                failureStatus == ShipmentStatus.FAILED ? "1818181818" : "1919191919"
+        );
+        Order order = createOrder(
+                creator,
+                CreatorRole.BUYER,
+                OrderStatus.READY_FOR_DELIVERY,
+                PaymentStatus.CONFIRMED
+        );
+        order.setEscrowReleasePolicy(EscrowReleasePolicy.CARRIER_PICKUP);
+        order.setVendorPayoutRecipientCode("RCP_PICKUP_" + failureStatus.name());
+        order = orderRepository.saveAndFlush(order);
+        createVerifiedCounterparty(order, "RCP_PICKUP_" + failureStatus.name());
+        OrderShipment shipment = createShipment(order, ShipmentStatus.CONFIRMED);
+        when(payoutProvider.initiatePayout(any(PayoutRequest.class))).thenAnswer(invocation -> {
+            PayoutRequest request = invocation.getArgument(0, PayoutRequest.class);
+            return new PayoutResponse("TRF_PICKUP_" + failureStatus.name(), request.reference(), PayoutStatus.PENDING);
+        });
+        Instant pickupTime = shipment.getProviderUpdatedAt().plusSeconds(1);
+
+        shippingService.applyWebhookEvent(new ShipmentStatusUpdatedEvent(
+                shipment.getProviderShipmentId(),
+                ShipmentStatus.IN_TRANSIT,
+                pickupTime,
+                true
+        ), "carrier-pickup-before-" + failureStatus.name());
+        String payoutReference = settlementRepository.findByOrder_Id(order.getId()).orElseThrow()
+                .getPayoutReference();
+        shippingService.applyWebhookEvent(new ShipmentStatusUpdatedEvent(
+                shipment.getProviderShipmentId(),
+                failureStatus,
+                pickupTime.plusSeconds(30),
+                true
+        ), "carrier-post-pickup-" + failureStatus.name());
+
+        Order manualReview = orderRepository.findById(order.getId()).orElseThrow();
+        assertThat(manualReview.getStatus()).isEqualTo(OrderStatus.MANUAL_REVIEW);
+        assertThat(manualReview.getCompletedAt()).isNull();
+        settlementService.applyPayoutStatus(new PayoutStatusUpdatedEvent(
+                payoutReference,
+                "TRF_PICKUP_" + failureStatus.name(),
+                PayoutStatus.SUCCESS,
+                ITEM_AMOUNT,
+                CURRENCY,
+                "RCP_PICKUP_" + failureStatus.name(),
+                pickupTime.plusSeconds(60),
+                true
+        ));
+
+        Order paidButUnresolved = orderRepository.findById(order.getId()).orElseThrow();
+        assertThat(paidButUnresolved.getStatus()).isEqualTo(OrderStatus.MANUAL_REVIEW);
+        assertThat(paidButUnresolved.getSettlementStatus()).isEqualTo(SettlementStatus.COMPLETED);
+        assertThat(paidButUnresolved.getCompletedAt()).isNull();
+        verify(payoutProvider, times(1)).initiatePayout(any(PayoutRequest.class));
+    }
+
+    @Test
+    @WithMockUser(username = BUYER_CREATOR_EMAIL, roles = "USER")
+    void newCarrierPickupOrderCannotBeReleasedByManualDeliveryConfirmation() {
+        User buyer = createCreator(BUYER_CREATOR_EMAIL, "1616161616");
+        Order order = createOrder(
+                buyer,
+                CreatorRole.BUYER,
+                OrderStatus.READY_FOR_DELIVERY,
+                PaymentStatus.CONFIRMED
+        );
+        order.setEscrowReleasePolicy(EscrowReleasePolicy.CARRIER_PICKUP);
+        order.setVendorPayoutRecipientCode("RCP_AUTOMATIC_ONLY");
+        order = orderRepository.saveAndFlush(order);
+        createVerifiedCounterparty(order, "RCP_AUTOMATIC_ONLY");
+        createShipment(order, ShipmentStatus.CONFIRMED);
+
+        Long orderId = order.getId();
+        assertThatThrownBy(() -> settlementService.confirmCreatorDelivery(orderId, "manual-release"))
+                .isInstanceOf(BusinessException.class)
+                .hasMessage("Vendor payout is automatic after carrier pickup");
+        assertThat(settlementRepository.count()).isZero();
         verify(payoutProvider, never()).initiatePayout(any(PayoutRequest.class));
     }
 
@@ -1585,6 +2699,7 @@ class PaymentReconciliationAndSettlementIntegrationTest {
         processedWebhookRepository.deleteAllInBatch();
         settlementRepository.deleteAllInBatch();
         walletTransactionRepository.deleteAllInBatch();
+        withdrawalRepository.deleteAllInBatch();
         receiptRepository.deleteAllInBatch();
         paymentAttemptRepository.deleteAllInBatch();
         quoteRepository.deleteAllInBatch();

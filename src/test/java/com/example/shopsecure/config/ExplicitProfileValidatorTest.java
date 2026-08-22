@@ -10,7 +10,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ExplicitProfileValidatorTest {
 
     @ParameterizedTest
-    @ValueSource(strings = {"local", "test", "prod"})
+    @ValueSource(strings = {"local", "test", "loadtest", "prod"})
     void acceptsExactlyOneSupportedProfile(String profile) {
         MockEnvironment environment = new MockEnvironment();
         environment.setActiveProfiles(profile);
@@ -28,6 +28,6 @@ class ExplicitProfileValidatorTest {
 
         assertThatThrownBy(() -> new ExplicitProfileValidator(environment))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessage("Set exactly one SPRING_PROFILES_ACTIVE value: local, test, or prod");
+                .hasMessage("Set exactly one SPRING_PROFILES_ACTIVE value: local, test, loadtest, or prod");
     }
 }

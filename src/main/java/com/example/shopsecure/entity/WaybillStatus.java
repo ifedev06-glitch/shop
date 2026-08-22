@@ -1,0 +1,19 @@
+package com.example.shopsecure.entity;
+
+public enum WaybillStatus {
+
+    AWAITING_PARTY_DETAILS,
+    AWAITING_QUOTE,
+    AWAITING_PAYMENT,
+    PAYMENT_REVIEW,
+    SHIPMENT_BOOKING,
+    READY_FOR_DELIVERY,
+    SHIPPING_FAILED,
+    CANCELLATION_PENDING,
+    REFUND_PENDING,
+    COMPLETED,
+    CANCELLED,
+    REFUNDED,
+    MANUAL_REVIEW
+
+}

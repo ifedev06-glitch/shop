@@ -31,6 +31,7 @@ public class OrderPaymentService {
     private final OrderPaymentAttemptRepository attemptRepository;
     private final VirtualAccountRepository virtualAccountRepository;
     private final OrderRepository orderRepository;
+    private final ShippingQuoteRepository quoteRepository;
     private final WalletRepository walletRepository;
     private final WalletService walletService;
     private final OrderStatusService statusService;
@@ -153,7 +154,8 @@ public class OrderPaymentService {
                     });
         }
         if (funded || classification == PaymentReceiptClassification.UNDERPAID
-                || classification == PaymentReceiptClassification.OVERPAID) {
+                || classification == PaymentReceiptClassification.OVERPAID
+                || classification == PaymentReceiptClassification.LATE) {
             orderRepository.save(order);
         }
         if (funded) {
@@ -169,14 +171,31 @@ public class OrderPaymentService {
         if (event.status() != PaymentTransactionStatus.SUCCESS) {
             return PaymentReceiptClassification.FAILED;
         }
+        if (attempt.getStatus() == PaymentAttemptStatus.SUPERSEDED) {
+            return PaymentReceiptClassification.LATE;
+        }
+        ShippingQuote quote = quoteRepository.findByShipment_Order_IdAndStatus(
+                order.getId(),
+                ShippingQuoteStatus.SELECTED
+        ).orElse(null);
+        if (quote != null
+                && (event.occurredAt() == null || event.occurredAt().isAfter(quote.getExpiresAt()))) {
+            return PaymentReceiptClassification.LATE;
+        }
         if (order.getFundingMode() != OrderFundingMode.PAYSTACK_CHECKOUT
                 || order.getStatus() != OrderStatus.AWAITING_PAYMENT
                 || order.getPaymentStatus() == PaymentStatus.CONFIRMED
                 || order.getFundedAt() != null) {
             return PaymentReceiptClassification.DUPLICATE;
         }
+        if (order.getTotalAmount() == null
+                || attempt.getAmount() == null
+                || attempt.getAmount().compareTo(order.getTotalAmount()) != 0) {
+            return PaymentReceiptClassification.LATE;
+        }
         if (event.currency() == null
-                || !attempt.getCurrency().equalsIgnoreCase(event.currency())) {
+                || !attempt.getCurrency().equalsIgnoreCase(event.currency())
+                || !order.getCurrency().equalsIgnoreCase(event.currency())) {
             return PaymentReceiptClassification.UNMATCHED;
         }
         if (event.amount() == null || event.amount().signum() <= 0) {
@@ -210,6 +229,16 @@ public class OrderPaymentService {
             }
             case UNDERPAID -> order.setPaymentStatus(PaymentStatus.UNDERPAID);
             case OVERPAID -> order.setPaymentStatus(PaymentStatus.OVERPAID);
+            case LATE -> {
+                if (order.getStatus() == OrderStatus.AWAITING_PAYMENT
+                        || order.getStatus() == OrderStatus.AWAITING_SHIPPING_RATE) {
+                    statusService.transition(
+                            order,
+                            OrderStatus.MANUAL_REVIEW,
+                            "Payment captured after the selected shipping quote expired"
+                    );
+                }
+            }
             case DUPLICATE, WALLET_CREDITED, FAILED, UNMATCHED -> {
             }
         }
@@ -293,7 +322,7 @@ public class OrderPaymentService {
                     order.setPaymentStatus(PaymentStatus.FAILED);
                 }
             }
-            case DUPLICATE, WALLET_CREDITED, UNMATCHED -> {
+            case LATE, DUPLICATE, WALLET_CREDITED, UNMATCHED -> {
             }
         }
         order.setUpdatedAt(Instant.now());

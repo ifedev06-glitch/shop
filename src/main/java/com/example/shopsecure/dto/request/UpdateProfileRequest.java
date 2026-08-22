@@ -4,6 +4,9 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
+import static com.example.shopsecure.util.NigerianPhoneNumber.INPUT_PATTERN;
+import static com.example.shopsecure.util.NigerianPhoneNumber.VALIDATION_MESSAGE;
+
 public record UpdateProfileRequest(
         @NotBlank(message = "First name is required")
         @Size(max = 100)
@@ -14,7 +17,7 @@ public record UpdateProfileRequest(
         String lastname,
 
         @NotBlank(message = "Phone number is required")
-        @Pattern(regexp = "^\\+?\\d{7,15}$", message = "Phone number must contain 7 to 15 digits")
+        @Pattern(regexp = INPUT_PATTERN, message = VALIDATION_MESSAGE)
         String phoneNumber
 ) {
 }

@@ -45,7 +45,7 @@ public class SensitiveDataCipher {
             System.arraycopy(ciphertext, 0, combined, iv.length, ciphertext.length);
             return Base64.getEncoder().encodeToString(combined);
         } catch (Exception exception) {
-            throw new BusinessException("Unable to protect bank account details");
+            throw new BusinessException("Unable to protect sensitive data");
         }
     }
 
@@ -60,7 +60,7 @@ public class SensitiveDataCipher {
             cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(TAG_LENGTH_BITS, iv));
             return new String(cipher.doFinal(ciphertext), StandardCharsets.UTF_8);
         } catch (Exception exception) {
-            throw new BusinessException("Unable to read protected bank account details");
+            throw new BusinessException("Unable to read protected sensitive data");
         }
     }
 }

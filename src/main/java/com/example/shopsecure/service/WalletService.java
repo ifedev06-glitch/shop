@@ -2,10 +2,12 @@ package com.example.shopsecure.service;
 
 import com.example.shopsecure.dto.response.WalletResponse;
 import com.example.shopsecure.dto.response.WalletTransactionResponse;
+import com.example.shopsecure.dto.response.PageResponse;
 import com.example.shopsecure.entity.*;
 import com.example.shopsecure.exception.BusinessException;
 import com.example.shopsecure.repository.WalletRepository;
 import com.example.shopsecure.repository.WalletTransactionRepository;
+import com.example.shopsecure.util.Pagination;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,7 +15,6 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
-import java.util.List;
 
 @Service
 @RequiredArgsConstructor
@@ -152,19 +153,20 @@ public class WalletService {
     }
 
     @Transactional(readOnly = true)
-    public List<WalletTransactionResponse> getCurrentTransactions() {
+    public PageResponse<WalletTransactionResponse> getCurrentTransactions(int page, int size) {
         User user = orderService.currentUser();
-        return transactionRepository.findByWallet_User_IdOrderByCreatedAtDesc(user.getId()).stream()
-                .map(transaction -> new WalletTransactionResponse(
-                        transaction.getReference(),
-                        transaction.getTransactionType(),
-                        transaction.getAmount(),
+        return PageResponse.from(transactionRepository.findByWallet_User_Id(
+                user.getId(),
+                Pagination.newestFirst(page, size)
+        ).map(transaction -> new WalletTransactionResponse(
+                         transaction.getReference(),
+                         transaction.getTransactionType(),
+                         transaction.getAmount(),
                         transaction.getBalanceBefore(),
                         transaction.getBalanceAfter(),
                         transaction.getOrder() == null ? null : transaction.getOrder().getId(),
-                        transaction.getCreatedAt()
-                ))
-                .toList();
+                         transaction.getCreatedAt()
+                )));
     }
 
     private BigDecimal money(BigDecimal amount) {

@@ -10,6 +10,7 @@ public record GuestOrderStatusResponse(
         OrderFundingMode fundingMode,
         PaymentStatus paymentStatus,
         SettlementStatus settlementStatus,
+        EscrowReleasePolicy escrowReleasePolicy,
         BigDecimal amountExpected,
         BigDecimal amountReceived,
         String currency,
@@ -17,6 +18,7 @@ public record GuestOrderStatusResponse(
         ShippingStatusResponse shipping,
         Instant fundedAt,
         Instant deliveryConfirmedAt,
+        Instant carrierPickupConfirmedAt,
         Instant completedAt
 ) {
 }

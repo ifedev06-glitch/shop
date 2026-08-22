@@ -60,6 +60,9 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
     }
 
     private String sanitizePath(String path) {
-        return path.replaceAll("(/orders/token/)[^/]+", "$1[redacted]");
+        return path
+                .replaceAll("(/orders/token/)[^/]+", "$1[redacted]")
+                .replaceAll("(/orders/tracking/)[^/]+", "$1[redacted]")
+                .replaceAll("(/waybills/invitations/)[^/]+", "$1[redacted]");
     }
 }

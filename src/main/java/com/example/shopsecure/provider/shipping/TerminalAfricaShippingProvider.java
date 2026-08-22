@@ -2,6 +2,7 @@ package com.example.shopsecure.provider.shipping;
 
 import com.example.shopsecure.exception.BusinessException;
 import com.example.shopsecure.provider.common.WebhookPayload;
+import com.example.shopsecure.util.NigerianPhoneNumber;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -14,6 +15,8 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.web.util.UriUtils;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -31,6 +34,7 @@ import java.util.Set;
 
 public class TerminalAfricaShippingProvider implements ShippingProvider {
 
+    private static final Logger log = LoggerFactory.getLogger(TerminalAfricaShippingProvider.class);
     private static final String INVALID_RESPONSE = "Terminal Africa returned an invalid response";
     private static final String REQUEST_FAILED = "Terminal Africa request failed";
     private static final Set<String> SHIPMENT_WEBHOOK_EVENTS = Set.of(
@@ -81,16 +85,87 @@ public class TerminalAfricaShippingProvider implements ShippingProvider {
         body.put("state", address.state());
         body.put("zip", address.postalCode());
 
-        JsonNode data = post("/addresses/validate", body);
+        JsonNode data = post("/addresses/validate", body, true);
         JsonNode validNode = data.get("is_valid");
         if (validNode == null || !validNode.isBoolean()) {
-            throw invalidResponse();
+            String message = firstDirectText(data, "message");
+            if (message == null || !"Address is valid".equalsIgnoreCase(message.trim())) {
+                throw invalidResponse();
+            }
+            return new AddressValidationResult(true, null);
         }
         JsonNode suggestedNode = data.get("suggested_address");
         ShipmentAddress suggestedAddress = suggestedNode != null && suggestedNode.isObject()
                 ? toAddress(suggestedNode, address)
                 : null;
         return new AddressValidationResult(validNode.asBoolean(), suggestedAddress);
+    }
+
+    @Override
+    public List<ShippingState> getStates(String countryCode) {
+        String normalizedCountry = locationCode(countryCode, "Country code");
+        if (normalizedCountry.length() != 2) {
+            throw new BusinessException("Country code must be an ISO-2 code");
+        }
+        JsonNode data = get("/states?country_code=" + encodedQuery(normalizedCountry));
+        JsonNode states = data.isArray() ? data : data.get("states");
+        if (states == null || !states.isArray()) {
+            throw invalidResponse();
+        }
+
+        List<ShippingState> result = new ArrayList<>();
+        for (JsonNode state : states) {
+            if (!state.isObject()) {
+                throw invalidResponse();
+            }
+            String code = firstDirectText(state, "isoCode", "iso_code", "code");
+            if (code == null) {
+                throw invalidResponse();
+            }
+            result.add(new ShippingState(
+                    requiredNodeText(state, "name"),
+                    code,
+                    valueOrDefault(
+                            firstDirectText(state, "countryCode", "country_code"),
+                            normalizedCountry
+                    )
+            ));
+        }
+        return List.copyOf(result);
+    }
+
+    @Override
+    public List<ShippingCity> getCities(String countryCode) {
+        String normalizedCountry = locationCode(countryCode, "Country code");
+        if (normalizedCountry.length() != 2) {
+            throw new BusinessException("Country code must be an ISO-2 code");
+        }
+        String path = "/cities?country_code=" + encodedQuery(normalizedCountry);
+        JsonNode data = get(path);
+        JsonNode cities = data.isArray() ? data : data.get("cities");
+        if (cities == null || !cities.isArray()) {
+            throw invalidResponse();
+        }
+
+        List<ShippingCity> result = new ArrayList<>();
+        for (JsonNode city : cities) {
+            if (!city.isObject()) {
+                throw invalidResponse();
+            }
+            String mappedStateCode = firstDirectText(city, "stateCode", "state_code");
+            if (mappedStateCode == null) {
+                throw invalidResponse();
+            }
+            result.add(new ShippingCity(
+                    requiredNodeText(city, "name"),
+                    mappedStateCode,
+                    valueOrDefault(
+                            firstDirectText(city, "countryCode", "country_code"),
+                            normalizedCountry
+                    )
+            ));
+        }
+        return List.copyOf(result);
     }
 
     @Override
@@ -263,7 +338,7 @@ public class TerminalAfricaShippingProvider implements ShippingProvider {
         }
         Instant occurredAt = parseInstant(occurredAtValue);
         if (occurredAt == null) {
-            occurredAt = Instant.now();
+            throw new BusinessException("Invalid Terminal Africa webhook timestamp");
         }
         return new ShipmentStatusUpdatedEvent(shipmentId, status, occurredAt, true);
     }
@@ -276,7 +351,7 @@ public class TerminalAfricaShippingProvider implements ShippingProvider {
         result.put("first_name", contact.firstName());
         result.put("last_name", contact.lastName());
         result.put("email", contact.email());
-        result.put("phone", contact.phone());
+        result.put("phone", NigerianPhoneNumber.normalize(contact.phone()));
         result.put("line1", address.line1());
         putIfNotNull(result, "line2", address.line2());
         result.put("city", address.city());
@@ -351,7 +426,14 @@ public class TerminalAfricaShippingProvider implements ShippingProvider {
                 }
             }
         }
-        return new ShipmentTrackingStatus(normalizeStatus(statusValue), lastUpdated, history);
+        return new ShipmentTrackingStatus(
+                firstNestedText(data, "shipment_id", "shipmentId"),
+                normalizeStatus(statusValue),
+                lastUpdated,
+                history,
+                firstNestedText(data, "tracking_number", "carrier_tracking_number", "tracking_reference"),
+                firstNestedText(data, "tracking_url", "carrier_tracking_url")
+        );
     }
 
     private JsonNode get(String path) {
@@ -362,7 +444,20 @@ public class TerminalAfricaShippingProvider implements ShippingProvider {
         return exchange(path, HttpMethod.POST, body);
     }
 
+    private JsonNode post(String path, Map<String, Object> body, boolean allowNullData) {
+        return exchange(path, HttpMethod.POST, body, allowNullData);
+    }
+
     private JsonNode exchange(String path, HttpMethod method, Map<String, Object> body) {
+        return exchange(path, method, body, false);
+    }
+
+    private JsonNode exchange(
+            String path,
+            HttpMethod method,
+            Map<String, Object> body,
+            boolean allowNullData
+    ) {
         try {
             HttpEntity<?> entity = body == null
                     ? new HttpEntity<>(headers())
@@ -391,15 +486,29 @@ public class TerminalAfricaShippingProvider implements ShippingProvider {
             JsonNode success = root.get("status");
             JsonNode data = root.get("data");
             if (success == null || !success.isBoolean() || !success.asBoolean()
-                    || data == null || data.isNull()) {
+                    || (!allowNullData && (data == null || data.isNull()))) {
                 throw invalidResponse();
             }
-            return data;
-        } catch (RestClientResponseException | ResourceAccessException exception) {
+            return data == null || data.isNull() ? root : data;
+        } catch (RestClientResponseException exception) {
+            String responseBody = exception.getResponseBodyAsString();
+            String detail = responseBody == null || responseBody.isBlank() ? exception.getMessage() : responseBody;
+            log.warn("Terminal Africa request failed on {} {}: {}", method, path, truncate(detail));
+            throw new BusinessException(REQUEST_FAILED);
+        } catch (ResourceAccessException exception) {
+            log.warn("Terminal Africa unreachable on {} {}: {}", method, path, exception.getMessage());
             throw new BusinessException(REQUEST_FAILED);
         } catch (RestClientException exception) {
+            log.warn("Terminal Africa request failed on {} {}: {}", method, path, exception.getMessage());
             throw new BusinessException(REQUEST_FAILED);
         }
+    }
+
+    private String truncate(String value) {
+        if (value == null || value.length() <= 400) {
+            return value;
+        }
+        return value.substring(0, 400);
     }
 
     private HttpHeaders headers() {
@@ -580,6 +689,19 @@ public class TerminalAfricaShippingProvider implements ShippingProvider {
         if (value == null || value.isBlank()) {
             throw new BusinessException(message);
         }
+    }
+
+    private String locationCode(String value, String field) {
+        requireText(value, field + " is required");
+        String normalized = value.trim().toUpperCase(Locale.ROOT);
+        if (!normalized.matches("[A-Z0-9-]{1,10}")) {
+            throw new BusinessException(field + " is invalid");
+        }
+        return normalized;
+    }
+
+    private String encodedQuery(String value) {
+        return UriUtils.encodeQueryParam(value, StandardCharsets.UTF_8);
     }
 
     private void putIfNotNull(Map<String, Object> target, String key, Object value) {

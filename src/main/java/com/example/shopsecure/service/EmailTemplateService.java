@@ -5,6 +5,7 @@ import com.example.shopsecure.entity.EscrowReleasePolicy;
 import com.example.shopsecure.entity.SettlementStatus;
 import com.example.shopsecure.entity.SettlementType;
 import com.example.shopsecure.entity.SettlementTrigger;
+import com.example.shopsecure.entity.OrderDisputeNotificationAudience;
 import com.example.shopsecure.provider.shipping.ShipmentStatus;
 import com.example.shopsecure.entity.WaybillPartyRole;
 import org.springframework.stereotype.Service;
@@ -331,6 +332,50 @@ public class EmailTemplateService {
                 safeDescription,
                 safeAmount,
                 HtmlUtils.htmlEscape(completion)
+        );
+    }
+
+    public String orderDisputeOpenedBody(
+            String firstName,
+            OrderDisputeNotificationAudience audience,
+            Long orderId,
+            String itemDescription,
+            String reason
+    ) {
+        boolean operations = audience == OrderDisputeNotificationAudience.OPERATIONS;
+        String safeName = HtmlUtils.htmlEscape(
+                firstName == null || firstName.isBlank() ? "there" : firstName
+        );
+        String safeHeading = HtmlUtils.htmlEscape(
+                operations ? "New order dispute received" : "Order dispute received"
+        );
+        String safeIntroduction = HtmlUtils.htmlEscape(operations
+                ? "A dispute was submitted for the order below."
+                : "A dispute has been submitted for this order and recorded by ShopSecure.");
+        String safeOrderId = HtmlUtils.htmlEscape(String.valueOf(orderId));
+        String safeDescription = HtmlUtils.htmlEscape(itemDescription);
+        String safeReason = HtmlUtils.htmlEscape(reason);
+        return """
+                <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                    <h2 style="color: #16a34a;">%s</h2>
+                    <p>Hi <strong>%s</strong>,</p>
+                    <p>%s</p>
+                    <div style="background: #f8fafc; border-radius: 8px; padding: 16px; margin: 16px 0;">
+                        <p><strong>Order:</strong> #%s</p>
+                        <p><strong>Item:</strong> %s</p>
+                        <p><strong>Reason:</strong></p>
+                        <div style="white-space: pre-wrap; overflow-wrap: anywhere;">%s</div>
+                    </div>
+                    <p>The ShopSecure team will review the dispute and contact both parties.</p>
+                    <p>Submitting a dispute does not automatically cancel delivery, reverse settlement, or issue a refund.</p>
+                </div>
+                """.formatted(
+                safeHeading,
+                safeName,
+                safeIntroduction,
+                safeOrderId,
+                safeDescription,
+                safeReason
         );
     }
 

@@ -19,6 +19,7 @@ import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.web.util.matcher.RegexRequestMatcher;
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
@@ -62,6 +63,10 @@ public class SecurityConfig {
                                  "/api/webhooks/terminal",
                                  "/api/webhooks/chowdeck"
                          ).permitAll()
+                        .requestMatchers(new RegexRequestMatcher(
+                                "^/orders/[1-9][0-9]*/disputes$",
+                                HttpMethod.POST.name()
+                        )).permitAll()
                         .requestMatchers(
                                 HttpMethod.GET,
                                 "/api/banks",

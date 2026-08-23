@@ -79,6 +79,21 @@ public class AdminController {
         return readService.order(orderId);
     }
 
+    @GetMapping("/disputes")
+    public PageResponse<AdminOrderDisputeSummaryResponse> disputes(
+            @RequestParam(required = false) Long orderId,
+            @RequestParam(required = false) OrderDisputeStatus status,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "20") int size
+    ) {
+        return readService.disputes(orderId, status, page, size);
+    }
+
+    @GetMapping("/disputes/{disputeId}")
+    public AdminOrderDisputeDetailResponse dispute(@PathVariable Long disputeId) {
+        return readService.dispute(disputeId);
+    }
+
     @GetMapping("/waybills")
     public PageResponse<AdminWaybillSummaryResponse> waybills(
             @RequestParam(required = false) Long creatorId,

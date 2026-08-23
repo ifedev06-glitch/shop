@@ -2,6 +2,7 @@ package com.example.shopsecure.service.admin;
 
 import com.example.shopsecure.dto.response.admin.AdminDashboardResponse;
 import com.example.shopsecure.entity.OrderStatus;
+import com.example.shopsecure.entity.OrderDisputeStatus;
 import com.example.shopsecure.entity.PaymentReceiptClassification;
 import com.example.shopsecure.entity.SettlementStatus;
 import com.example.shopsecure.entity.WalletWithdrawalStatus;
@@ -53,6 +54,7 @@ public class AdminDashboardService {
         Map<String, Long> settlementStatuses = metricsRepository.settlementStatusCounts();
         Map<String, Long> shipmentStatuses = metricsRepository.shipmentStatusCounts();
         Map<String, Long> receiptClassifications = metricsRepository.paymentReceiptClassificationCounts();
+        Map<String, Long> disputeStatuses = metricsRepository.disputeStatusCounts();
         Map<String, BigDecimal> walletBalances = metricsRepository.availableWalletBalances();
         Map<String, BigDecimal> outstandingWithdrawals = metricsRepository.outstandingWithdrawalAmounts();
 
@@ -103,7 +105,9 @@ public class AdminDashboardService {
                                 PaymentReceiptClassification.LATE,
                                 PaymentReceiptClassification.DUPLICATE,
                                 PaymentReceiptClassification.UNMATCHED,
-                                PaymentReceiptClassification.FAILED)
+                                PaymentReceiptClassification.FAILED),
+                        disputeStatuses,
+                        value(disputeStatuses, OrderDisputeStatus.OPEN)
                 )
         );
     }

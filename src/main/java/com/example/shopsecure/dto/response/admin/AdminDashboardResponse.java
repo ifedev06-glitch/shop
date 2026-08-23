@@ -53,7 +53,9 @@ public record AdminDashboardResponse(
             long withdrawalAttentionRequired,
             long settlementAttentionRequired,
             long shippingAttentionRequired,
-            long anomalousPaymentReceipts
+            long anomalousPaymentReceipts,
+            Map<String, Long> disputesByStatus,
+            long openDisputes
     ) {
     }
 }

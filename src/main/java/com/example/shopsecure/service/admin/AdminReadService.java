@@ -50,6 +50,8 @@ public class AdminReadService {
     private final AdminWaybillRefundReadRepository waybillRefundRepository;
     private final AdminWaybillInvitationReadRepository waybillInvitationRepository;
     private final AdminWaybillHistoryReadRepository waybillHistoryRepository;
+    private final OrderDisputeRepository disputeRepository;
+    private final OrderDisputeNotificationRepository disputeNotificationRepository;
     private final VirtualAccountRepository virtualAccountRepository;
     private final WithdrawalBankAccountRepository bankAccountRepository;
     private final OrderCounterpartyRepository counterpartyRepository;
@@ -236,6 +238,70 @@ public class AdminReadService {
                                 history.getCreatedAt()
                         ))
                         .toList()
+        );
+    }
+
+    @Transactional(readOnly = true, timeout = 5)
+    public PageResponse<AdminOrderDisputeSummaryResponse> disputes(
+            Long orderId,
+            OrderDisputeStatus status,
+            int page,
+            int size
+    ) {
+        Specification<OrderDispute> specification = all();
+        if (orderId != null) {
+            specification = specification.and((root, query, builder) ->
+                    builder.equal(root.get("order").get("id"), orderId));
+        }
+        if (status != null) {
+            specification = specification.and((root, query, builder) ->
+                    builder.equal(root.get("status"), status));
+        }
+        return PageResponse.from(disputeRepository
+                .findAll(specification, adminPage(page, size))
+                .map(this::toDisputeSummary));
+    }
+
+    @Transactional(readOnly = true, timeout = 5)
+    public AdminOrderDisputeDetailResponse dispute(Long disputeId) {
+        OrderDispute dispute = disputeRepository.findById(disputeId)
+                .orElseThrow(() -> new ResourceNotFoundException("Order dispute not found"));
+        Order order = dispute.getOrder();
+        OrderCounterparty counterparty = counterpartyRepository.findByOrder_Id(order.getId()).orElse(null);
+
+        AdminOrderDisputeDetailResponse.PartySnapshot creator = new AdminOrderDisputeDetailResponse.PartySnapshot(
+                order.getCreatorFirstName(),
+                order.getCreatorLastName(),
+                maskEmail(order.getCreatorEmail()),
+                maskPhone(order.getCreatorPhoneNumber())
+        );
+        AdminOrderDisputeDetailResponse.PartySnapshot opposite = counterparty == null
+                ? null
+                : new AdminOrderDisputeDetailResponse.PartySnapshot(
+                        counterparty.getFirstName(),
+                        counterparty.getLastName(),
+                        maskEmail(counterparty.getEmail()),
+                        maskPhone(counterparty.getPhoneNumber())
+                );
+        List<AdminOrderDisputeDetailResponse.NotificationSnapshot> notifications =
+                disputeNotificationRepository.findByDispute_IdOrderByAudienceAsc(disputeId).stream()
+                        .map(notification -> new AdminOrderDisputeDetailResponse.NotificationSnapshot(
+                                notification.getAudience(),
+                                notification.getStatus(),
+                                notification.getAttemptCount(),
+                                notification.getNextAttemptAt(),
+                                notification.getSentAt(),
+                                notification.getFailureReason()
+                        ))
+                        .toList();
+
+        return new AdminOrderDisputeDetailResponse(
+                toDisputeSummary(dispute),
+                order.getItemDescription(),
+                dispute.getReason(),
+                order.getCreatorRole() == CreatorRole.BUYER ? creator : opposite,
+                order.getCreatorRole() == CreatorRole.VENDOR ? creator : opposite,
+                notifications
         );
     }
 
@@ -493,6 +559,21 @@ public class AdminReadService {
                 order.getCompletedAt(),
                 order.getCreatedAt(),
                 order.getUpdatedAt()
+        );
+    }
+
+    private AdminOrderDisputeSummaryResponse toDisputeSummary(OrderDispute dispute) {
+        Order order = dispute.getOrder();
+        return new AdminOrderDisputeSummaryResponse(
+                dispute.getId(),
+                order.getId(),
+                dispute.getStatus(),
+                order.getStatus(),
+                order.getPaymentStatus(),
+                order.getSettlementStatus(),
+                reasonPreview(dispute.getReason()),
+                dispute.getCreatedAt(),
+                dispute.getUpdatedAt()
         );
     }
 
@@ -900,6 +981,13 @@ public class AdminReadService {
             return value;
         }
         return value.substring(0, maximumLength);
+    }
+
+    private String reasonPreview(String reason) {
+        String normalized = reason == null ? "" : reason.trim().replaceAll("\\s+", " ");
+        return normalized.length() <= 180
+                ? normalized
+                : normalized.substring(0, 177) + "...";
     }
 
     private boolean hasText(String value) {

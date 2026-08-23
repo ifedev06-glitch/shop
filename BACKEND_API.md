@@ -2,6 +2,42 @@
 
 This document describes the implemented backend contract. Provider secret keys must never be sent to a browser or mobile client.
 
+## V20 Order Disputes
+
+Flyway V20 adds one notification-only dispute record per funded escrow order and a durable, independent email outbox for the buyer, vendor, and ShopSecure operations. Creating a dispute never changes order, payment, shipment, settlement, payout, or refund state. Shipping and settlement continue under the order's existing rules.
+
+The public intake endpoint accepts a canonical positive numeric order ID and requires no JWT, guest token, tracking token, or OTP:
+
+```http
+POST /orders/{orderId}/disputes
+Content-Type: application/json
+
+{
+  "reason": "The package arrived with visible screen damage."
+}
+```
+
+`reason` is required, may contain ordinary line breaks and tabs, and is limited to 2000 characters. Other control characters are rejected. Requests larger than 16 KiB receive `413`. A syntactically valid request always receives the same non-cacheable `202` response whether the order is unknown, unfunded, missing a counterparty, already disputed, or accepted:
+
+```json
+{
+  "message": "If the order is eligible, the dispute has been received and the ShopSecure team will contact both parties."
+}
+```
+
+This intentionally prevents the response from confirming whether a sequential order ID exists. Only an order with `paymentStatus: "CONFIRMED"`, a non-null `fundedAt`, a complete counterparty, and no existing dispute creates data. The order row is locked during intake and `order_disputes.order_id` is unique, so concurrent and repeated submissions cannot create a second case or resend the three opening emails. Malformed IDs/bodies return `400`; endpoint-specific per-IP and per-order throttles return `429` with `Retry-After`.
+
+Accepted disputes start as `OPEN`. The persisted enum also reserves `UNDER_REVIEW`, `RESOLVED`, and `REJECTED`, but V20 exposes no public or admin status mutation. Each opening email safely escapes the item description and reason, states that the ShopSecure team will contact both parties, and states that the dispute does not automatically cancel delivery, reverse settlement, or issue a refund. Buyer, vendor, and the fixed operations recipient `fizzois580@gmail.com` have separate `PENDING | SENT | FAILED` rows, retry state, and stable Resend keys in the form `order-dispute-opened/{notificationId}`. One destination failing does not block the other two.
+
+Admin reads are available at:
+
+```text
+GET /api/admin/disputes?orderId={orderId}&status=OPEN&page=0&size=20
+GET /api/admin/disputes/{disputeId}
+```
+
+The list is newest-ID-first and returns a bounded single-line reason preview. Detail returns the full reason, item description, masked buyer/vendor contact snapshots, and all three notification delivery states. The dashboard adds `operations.disputesByStatus` and `operations.openDisputes`. All admin routes remain read-only and require `ROLE_ADMIN`.
+
 ## V19 Carrier-Pickup Escrow Release
 
 Flyway V19 changes the escrow release policy for orders created after deployment. New orders persist `escrowReleasePolicy: "CARRIER_PICKUP"`; existing orders are migrated as `BUYER_DELIVERY_CONFIRMATION` and keep their previous buyer-confirmation workflow. This prevents an upgrade from unexpectedly releasing escrow held by an existing order.
@@ -109,7 +145,7 @@ Payment confirmation also commits one durable email intent for the buyer and one
 
 This section is authoritative for escrow orders and waybills. Any older example later in this document that mentions create-time share links, public party completion, public quote selection, `payerType` in a waybill client request, or `AWAITING_PARTY_DETAILS` for a new record is superseded by this section. Those enum values and service methods remain only for historical database rows; no current controller exposes the old onboarding routes.
 
-Flyway V19 is the current schema version. V16 stores the resolved per-order vendor payout snapshot and closes unfunded legacy `AWAITING_COUNTERPARTY` drafts, V17 adds custom order tracking links and durable participant emails, V18 adds Chowdeck Relay plus its audited admin control, and V19 adds per-order carrier-pickup escrow release.
+Flyway V20 is the current schema version. V16 stores the resolved per-order vendor payout snapshot and closes unfunded legacy `AWAITING_COUNTERPARTY` drafts, V17 adds custom order tracking links and durable participant emails, V18 adds Chowdeck Relay plus its audited admin control, V19 adds per-order carrier-pickup escrow release, and V20 adds notification-only order disputes with durable three-recipient email delivery.
 
 ### Escrow Orders
 
@@ -449,6 +485,7 @@ Authenticated creator responses from `GET /orders` and `GET /orders/{orderId}` i
 | `GET` | `/api/banks` | Public Paystack-supported Nigerian banks |
 | `GET` | `/api/locations/states` | Public Nigerian shipping states |
 | `GET` | `/api/locations/states/{stateCode}/cities` | Public shipping cities for a returned state code |
+| `POST` | `/orders/{orderId}/disputes` | Public generic reason-only dispute intake for a canonical numeric order ID |
 | `POST` | `/orders/token/{shareToken}/payment-access-otp` | Public buyer payment-access OTP |
 | `POST` | `/orders/token/{shareToken}/verify-otp` | Public; returns guest access token |
 | `POST` | `/orders/token/{shareToken}/resend-otp` | Public |
@@ -662,7 +699,7 @@ The V8 balance and transaction-amount checks intentionally fail closed if popula
 
 Flyway V9 adds `PAYSTACK_CHECKOUT` and persisted order payment attempts. Unselected vendor-created orders with no issued payment reference move safely to checkout. Selected or historical `DIRECT_DVA` orders remain unchanged to preserve delayed-transfer handling.
 
-Flyway V19 is the current schema version. V14 adds the independent waybill delivery domain, V15 adds its durable per-party email outbox, V16 adds the frozen vendor payout snapshot plus the complete-at-creation transition, V17 adds custom escrow-order tracking links and durable participant emails, V18 adds Chowdeck Relay control and audit history, and V19 adds immutable per-order release policy, pickup evidence, settlement trigger audit fields, and typed order notification intents. Waybills do not extend or reuse escrow `orders`.
+Flyway V20 is the current schema version. V14 adds the independent waybill delivery domain, V15 adds its durable per-party email outbox, V16 adds the frozen vendor payout snapshot plus the complete-at-creation transition, V17 adds custom escrow-order tracking links and durable participant emails, V18 adds Chowdeck Relay control and audit history, V19 adds immutable per-order release policy, pickup evidence, settlement trigger audit fields, and typed order notification intents, and V20 adds order disputes plus their durable email outbox. Waybills do not extend or reuse escrow `orders`.
 
 ## Waybill Delivery API (Flyway V14)
 

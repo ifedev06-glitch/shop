@@ -8,6 +8,8 @@ Responses handled by `AdminController` set `Cache-Control: no-store` and `Pragma
 
 Flyway V19 adds pickup-settlement audit and recovery fields. Order summaries expose `escrowReleasePolicy` and `carrierPickupConfirmedAt`; settlement rows expose `trigger`, `triggeredAt`, `nextReconciliationAt`, and durable unexpected provider reference/transfer IDs when a response mismatch stops automation. New orders use `CARRIER_PICKUP`, while migrated orders retain their persisted legacy policy. A V19 order can have root status `IN_TRANSIT` with settlement `COMPLETED`, meaning the vendor bank payout succeeded while carrier delivery is still in progress. Definitive payout rejection/failure, mismatched references or transfer IDs, and successful responses with the wrong amount, currency, or frozen recipient become `REQUIRES_ACTION`; the backend does not automatically dispatch a second payout reference.
 
+Flyway V20 adds read-only order-dispute operations. Disputes are notification-only: their presence does not pause or modify shipment, settlement, payout, refund, payment, or order status. Admins can inspect the submitted reason and per-recipient email state, but V20 provides no dispute mutation.
+
 ## Endpoints
 
 | Method | Path | Purpose |
@@ -17,6 +19,8 @@ Flyway V19 adds pickup-settlement audit and recovery fields. Order summaries exp
 | `GET` | `/api/admin/users/{userId}` | Masked profile, wallet, virtual account and bank summary |
 | `GET` | `/api/admin/orders` | Paginated global order list |
 | `GET` | `/api/admin/orders/{orderId}` | Order, parties, parcel, shipment, settlement, payment and history detail |
+| `GET` | `/api/admin/disputes` | Paginated order disputes with bounded reason previews |
+| `GET` | `/api/admin/disputes/{disputeId}` | Full reason, masked parties and notification delivery states |
 | `GET` | `/api/admin/waybills` | Paginated global V14 waybill list |
 | `GET` | `/api/admin/waybills/{waybillId}` | Waybill, parties, parcel, shipment, quotes, payments, refunds, invitations and history |
 | `GET` | `/api/admin/wallet-transactions` | Paginated wallet ledger |
@@ -48,6 +52,11 @@ Waybill timestamps are UTC `LocalDateTime` strings without an offset suffix. Das
 - `paymentStatus`
 - `settlementStatus`
 - `fundingMode`
+
+`GET /api/admin/disputes`:
+
+- `orderId`
+- `status=OPEN|UNDER_REVIEW|RESOLVED|REJECTED`
 
 `GET /api/admin/waybills`:
 
@@ -90,6 +99,88 @@ Waybill timestamps are UTC `LocalDateTime` strings without an offset suffix. Das
 - `providerStatus`
 
 Filters on one request are combined with AND. Omit unused parameters rather than sending empty strings. Enum values are uppercase and case-sensitive. Invalid `page`/`size`, a malformed numeric ID, or an invalid enum returns `400`; a well-formed numeric detail ID with no record returns `404`. A valid non-admin JWT returns `403`, while missing or invalid authentication can return `401` or `403` from Spring Security.
+
+## V20 Order Disputes
+
+List disputes newest first:
+
+```http
+GET /api/admin/disputes?orderId=42&status=OPEN&page=0&size=20
+Authorization: Bearer <admin-jwt>
+```
+
+```json
+{
+  "content": [
+    {
+      "id": 7,
+      "orderId": 42,
+      "status": "OPEN",
+      "orderStatus": "IN_TRANSIT",
+      "paymentStatus": "CONFIRMED",
+      "settlementStatus": "PENDING",
+      "reasonPreview": "The package arrived with visible screen damage.",
+      "createdAt": "2026-08-22T16:30:00Z",
+      "updatedAt": "2026-08-22T16:30:00Z"
+    }
+  ],
+  "page": 0,
+  "size": 20,
+  "totalElements": 1,
+  "totalPages": 1,
+  "first": true,
+  "last": true
+}
+```
+
+Read one dispute:
+
+```http
+GET /api/admin/disputes/7
+Authorization: Bearer <admin-jwt>
+```
+
+```json
+{
+  "summary": {
+    "id": 7,
+    "orderId": 42,
+    "status": "OPEN",
+    "orderStatus": "IN_TRANSIT",
+    "paymentStatus": "CONFIRMED",
+    "settlementStatus": "PENDING",
+    "reasonPreview": "The package arrived with visible screen damage.",
+    "createdAt": "2026-08-22T16:30:00Z",
+    "updatedAt": "2026-08-22T16:30:00Z"
+  },
+  "itemDescription": "MacBook Air M3",
+  "reason": "The package arrived with visible screen damage.",
+  "buyer": {
+    "firstName": "Ada",
+    "lastName": "Buyer",
+    "maskedEmail": "a***@example.com",
+    "maskedPhoneNumber": "******5678"
+  },
+  "vendor": {
+    "firstName": "Bola",
+    "lastName": "Vendor",
+    "maskedEmail": "b***@example.com",
+    "maskedPhoneNumber": "******4321"
+  },
+  "notifications": [
+    {
+      "audience": "BUYER",
+      "status": "SENT",
+      "attemptCount": 0,
+      "nextAttemptAt": null,
+      "sentAt": "2026-08-22T16:30:02Z",
+      "failureReason": null
+    }
+  ]
+}
+```
+
+The list never returns the full reason. Detail contact values stay masked consistently with other admin order views. Notification `status` is `PENDING`, `SENT`, or `FAILED`; each row is independent. `SENT` means Resend accepted the send request, not guaranteed mailbox delivery.
 
 ## V14 Waybill Operations
 
@@ -428,6 +519,7 @@ Dashboard queries do not include V14 waybill rows. Waybill counts, delivery valu
 - Customer obligation is available wallet balance plus outstanding withdrawals.
 - Unsettled order principal is the item amount on confirmed orders whose settlement is not complete.
 - Payment receipts requiring review report successful `UNDERPAID`, `OVERPAID`, `LATE`, `DUPLICATE` and `UNMATCHED` receipt amounts by classification and currency. These are gross operational review amounts, not an accounting liability total.
+- `disputesByStatus` counts persisted order disputes by case status; `openDisputes` is the `OPEN` count used by the admin attention queue.
 - Fee totals are operational totals and should not be presented as recognized accounting revenue without reconciliation.
 
 ## Provisioning an admin

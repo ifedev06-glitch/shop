@@ -29,6 +29,9 @@ public class PublicWaybillResponseHeadersFilter extends OncePerRequestFilter {
                 || path.startsWith(PUBLIC_TRACKING_PREFIX)) {
             return false;
         }
+        if ("POST".equals(request.getMethod()) && path.matches("/orders/[1-9][0-9]*/disputes")) {
+            return false;
+        }
         return !("POST".equals(request.getMethod()) && path.equals(CREATOR_ROOT))
                 && !("POST".equals(request.getMethod())
                 && path.matches("/waybills/[^/]+/(invitations/reissue|payments/checkout)"))

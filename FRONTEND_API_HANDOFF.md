@@ -1,21 +1,22 @@
 # ShopSecure Frontend API Handoff
 
-Last updated: 2026-08-21
+Last updated: 2026-08-22
 
 ## Contract Status
 
-This document describes the backend contract currently implemented in the ShopSecure working tree. The guest, shipping, wallet-first buyer payment, order-specific guest checkout, automatic carrier-pickup payout, legacy delivery-confirmation, standalone waybill delivery, admin operations, and audited Chowdeck control flows are implemented.
+This document describes the backend contract currently implemented in the ShopSecure working tree. The guest, shipping, wallet-first buyer payment, order-specific guest checkout, automatic carrier-pickup payout, legacy delivery-confirmation, standalone waybill delivery, order-dispute intake, admin operations, and audited Chowdeck control flows are implemented.
 
-The frontend must be released with the matching backend code and Flyway V19 migration. V19 is the current schema version. There is no API version prefix, so an old frontend cannot safely use the new backend contract.
+The frontend must be released with the matching backend code and Flyway V20 migration. V20 is the current schema version. There is no API version prefix, so an old frontend cannot safely use the new backend contract.
 
-The following V16 complete-at-creation rules, V17 tracking additions, V18 provider-control rules, and V19 carrier-pickup settlement rules are authoritative. Older examples later in this document that mention create-time order links, public party completion, public quote selection, `CreateWaybillRequest.payerType`, or new `AWAITING_PARTY_DETAILS` records are historical V14/V15 material and must not be implemented.
+The following V16 complete-at-creation rules, V17 tracking additions, V18 provider-control rules, V19 carrier-pickup settlement rules, and V20 dispute rules are authoritative. Older examples later in this document that mention create-time order links, public party completion, public quote selection, `CreateWaybillRequest.payerType`, or new `AWAITING_PARTY_DETAILS` records are historical V14/V15 material and must not be implemented.
 
-Important V16-V19 changes:
+Important V16-V20 changes:
 
 - Every order funded after V17 receives one public bearer tracking link. The same link is returned to the creator and verified guest and emailed independently to the buyer and vendor; opening it requires no login or OTP.
 - New orders persist `escrowReleasePolicy: "CARRIER_PICKUP"`. Authenticated carrier `IN_TRANSIT` evidence automatically queues item amount only to the frozen vendor bank recipient; there is no buyer confirmation action.
 - Existing orders persist `BUYER_DELIVERY_CONFIRMATION` and retain their legacy confirmation workflow. Always branch on `escrowReleasePolicy`; never infer policy from creation date.
 - The first pickup observation records `carrierPickupConfirmedAt` and creates independently retried pickup emails for buyer and vendor. No frontend notification mutation is required.
+- Any visitor can submit one reason-only dispute against a funded order's numeric ID. The backend returns one generic `202`, does not change lifecycle state, and independently emails buyer, vendor, and operations.
 - Paid waybills now create durable sender and recipient pickup-stage emails containing the validated Terminal/carrier tracking link after the carrier confirms booking; no frontend notification mutation is required.
 - Public cached Nigerian state and city lookup routes are available under `/api/locations/**`; the frontend must not call Terminal Africa directly.
 - `/waybills/**` is a completed delivery-only domain, separate from escrow `/orders/**`.
@@ -41,6 +42,98 @@ Important V16-V19 changes:
 - The waybill creator always selects the quote. A payment-only link is returned from selection only when `payerRole !== creatorRole`.
 - Orders, wallet transactions, and wallet withdrawals use zero-based pagination.
 - Business and invalid-state errors normally return `400`; an optimistic Chowdeck admin-control version conflict returns `409`.
+
+## V20 Order Dispute Contract
+
+The customer action uses the numeric `orderId` already present in member order details and public tracking responses. It does not send a member JWT, share token, guest token, tracking token, OTP, reporter identity, or idempotency key:
+
+```http
+POST /orders/{orderId}/disputes
+Content-Type: application/json
+
+{
+  "reason": "The package arrived with visible screen damage."
+}
+```
+
+```ts
+export interface CreateOrderDisputeRequest {
+  reason: string;
+}
+
+export interface CreateOrderDisputeResponse {
+  message: string;
+}
+```
+
+The backend accepts only canonical positive decimal IDs. `reason` must be nonblank, is limited to 2000 characters, permits ordinary line breaks/tabs, and rejects other control characters. Keep it only in component state; do not place the reason in a URL, analytics payload, console log, browser storage, cache, or error-reporting context.
+
+Every syntactically valid request returns `202` and exactly this body, including unknown, unfunded, and already-disputed IDs:
+
+```json
+{
+  "message": "If the order is eligible, the dispute has been received and the ShopSecure team will contact both parties."
+}
+```
+
+Do not infer order existence or dispute creation from this response. Show the same acknowledgement text. `400` means the ID/body is malformed, `413` means the request exceeds 16 KiB, and `429` means the public abuse limit was reached; honor `Retry-After`. Submission is notification-only and does not cancel delivery, freeze settlement, reverse payout, or promise a refund. Do not disable other order actions unless a later authoritative order response changes them.
+
+Admin dispute reads are:
+
+```text
+GET /api/admin/disputes?orderId=&status=&page=0&size=20
+GET /api/admin/disputes/{disputeId}
+```
+
+```ts
+export type OrderDisputeStatus =
+  | "OPEN"
+  | "UNDER_REVIEW"
+  | "RESOLVED"
+  | "REJECTED";
+
+export type OrderDisputeNotificationAudience = "BUYER" | "VENDOR" | "OPERATIONS";
+export type OrderDisputeNotificationStatus = "PENDING" | "SENT" | "FAILED";
+
+export interface AdminOrderDisputeSummaryResponse {
+  id: number;
+  orderId: number;
+  status: OrderDisputeStatus;
+  orderStatus: OrderStatus;
+  paymentStatus: PaymentStatus;
+  settlementStatus: SettlementStatus;
+  reasonPreview: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminOrderDisputeDetailResponse {
+  summary: AdminOrderDisputeSummaryResponse;
+  itemDescription: string;
+  reason: string;
+  buyer: AdminOrderDisputeParty | null;
+  vendor: AdminOrderDisputeParty | null;
+  notifications: AdminOrderDisputeNotification[];
+}
+
+export interface AdminOrderDisputeParty {
+  firstName: string;
+  lastName: string;
+  maskedEmail: string;
+  maskedPhoneNumber: string;
+}
+
+export interface AdminOrderDisputeNotification {
+  audience: OrderDisputeNotificationAudience;
+  status: OrderDisputeNotificationStatus;
+  attemptCount: number;
+  nextAttemptAt: string | null;
+  sentAt: string | null;
+  failureReason: string | null;
+}
+```
+
+`AdminDashboardResponse.operations` additionally includes `disputesByStatus: Record<string, number>` and `openDisputes: number`. V20 admin dispute APIs are read-only; do not render resolve/reject mutations that do not exist.
 
 ## Frontend Order Tracking Implementation Brief
 

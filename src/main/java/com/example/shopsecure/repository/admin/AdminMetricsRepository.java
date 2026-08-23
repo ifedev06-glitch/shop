@@ -118,6 +118,10 @@ public class AdminMetricsRepository {
         return groupedCounts("select r.classification, count(r) from PaymentReceipt r group by r.classification");
     }
 
+    public Map<String, Long> disputeStatusCounts() {
+        return groupedCounts("select d.status, count(d) from OrderDispute d group by d.status");
+    }
+
     public Map<String, Map<String, BigDecimal>> paymentReceiptAmountsRequiringReview() {
         List<Object[]> rows = entityManager.createQuery("""
                         select r.classification, r.currency, coalesce(sum(r.amount), 0)

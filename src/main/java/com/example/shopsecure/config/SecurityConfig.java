@@ -74,6 +74,10 @@ public class SecurityConfig {
                                 "/api/locations/states/*/cities",
                                 "/orders/tracking/*"
                         ).permitAll()
+                        .requestMatchers(
+                                HttpMethod.POST,
+                                "/orders/tracking/*/confirm-delivery"
+                        ).permitAll()
                         .requestMatchers("/orders/token/**").permitAll()
                         .requestMatchers("/waybills/invitations/**").permitAll()
                         .requestMatchers("/api/admin/**").hasRole("ADMIN")

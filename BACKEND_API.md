@@ -38,15 +38,23 @@ GET /api/admin/disputes/{disputeId}
 
 The list is newest-ID-first and returns a bounded single-line reason preview. Detail returns the full reason, item description, masked buyer/vendor contact snapshots, and all three notification delivery states. The dashboard adds `operations.disputesByStatus` and `operations.openDisputes`. All admin routes remain read-only and require `ROLE_ADMIN`.
 
-## V19 Carrier-Pickup Escrow Release
+## Receiver-Confirmed Escrow Release
 
-Flyway V19 changes the escrow release policy for orders created after deployment. New orders persist `escrowReleasePolicy: "CARRIER_PICKUP"`; existing orders are migrated as `BUYER_DELIVERY_CONFIRMATION` and keep their previous buyer-confirmation workflow. This prevents an upgrade from unexpectedly releasing escrow held by an existing order.
+The current application creates both buyer-created and vendor-created orders with `escrowReleasePolicy: "BUYER_DELIVERY_CONFIRMATION"`. This application behavior change does not migrate existing rows: an already-created `CARRIER_PICKUP` order retains its automatic pickup-settlement workflow.
 
-For a new order, authenticated carrier evidence normalized to shipment `IN_TRANSIT` confirms physical pickup. `CONFIRMED` means pickup is only booked and never releases money. `DELIVERED` is a catch-up trigger if the `IN_TRANSIT` update was missed. Terminal updates arrive through the signed webhook. Chowdeck's unsigned callback is only a reconciliation signal: the backend fetches the delivery through Chowdeck's authenticated API before applying status or releasing funds, with persisted-provider polling retained as fallback.
+For a new order, authenticated carrier `IN_TRANSIT` or `DELIVERED` evidence records `carrierPickupConfirmedAt` and queues the durable buyer/vendor pickup notifications, but it does not create a settlement or dispatch money. Item funds remain in escrow until the public tracking-link confirmation mutation succeeds:
 
-The first pickup observation atomically records `carrierPickupConfirmedAt`, creates one `EXTERNAL_PAYOUT` settlement for item amount only, and appends durable buyer and vendor pickup-email intents. Paystack dispatch runs after that carrier transaction commits and uses the deterministic reference `shopsecure_order_{orderId}_payout`; scheduled payout reconciliation recovers an interrupted dispatch. Replayed, newer duplicate, or polling observations cannot create a second settlement or email intent. New orders never fall back to vendor wallet credit.
+```http
+POST /orders/tracking/{trackingToken}/confirm-delivery
+Idempotency-Key: <stable-client-generated-key>
+Content-Type: application/json
 
-Payout success while the parcel is moving changes order status to `IN_TRANSIT`, with `settlementStatus: "COMPLETED"`; it does not claim delivery completion. A later carrier `DELIVERED` update changes the order to `COMPLETED`. Because an external bank payout cannot be automatically clawed back, a later carrier failure or cancellation requires manual financial review and does not silently refund the buyer.
+{ "confirmation": true }
+```
+
+This mutation requires no member JWT, guest access token, or OTP. The active, unexpired tracking token is the bearer capability, so anyone holding the shared tracking URL can trigger release. The frontend must reuse one stable `Idempotency-Key` after an ambiguous response. The first accepted confirmation records `deliveryConfirmedAt`, creates one `EXTERNAL_PAYOUT` settlement for item amount only, and dispatches to the vendor recipient frozen at order creation using `shopsecure_order_{orderId}_payout`. Scheduled reconciliation recovers interrupted or ambiguous provider dispatch without creating a second payout reference.
+
+Flyway V19 still supplies the per-order policy, pickup evidence, settlement trigger, and reconciliation fields. Existing `CARRIER_PICKUP` orders continue to settle on authenticated carrier pickup; `BUYER_DELIVERY_CONFIRMATION` orders settle only through a delivery-confirmation path.
 
 ## V18 Chowdeck Relay Control
 
@@ -66,7 +74,7 @@ The browser link is generated from `FRONTEND_BASE_URL`:
 https://<frontend-host>/orders/tracking/{trackingToken}
 ```
 
-The frontend route reads the token and calls this public, read-only backend endpoint without a member JWT:
+The frontend route reads the token and calls this public snapshot endpoint without a member JWT:
 
 ```text
 GET /orders/tracking/{trackingToken}
@@ -116,16 +124,17 @@ GET /orders/tracking/{trackingToken}
     "selectedQuote": { "id": 9, "carrierName": "DHL", "deliveryEstimate": "3-5 business days" }
   },
   "escrow": {
-    "releasePolicy": "CARRIER_PICKUP",
+    "releasePolicy": "BUYER_DELIVERY_CONFIRMATION",
     "status": "PENDING",
     "settlementType": "EXTERNAL_PAYOUT",
-    "trigger": "CARRIER_PICKUP",
+    "trigger": "BUYER_DELIVERY_CONFIRMATION",
     "amount": 125000.00,
     "amountPending": 125000.00,
     "amountReleased": 0.00,
     "currency": "NGN"
   },
   "fundedAt": "2026-08-19T09:07:47Z",
+  "deliveryConfirmedAt": "2026-08-19T16:45:00Z",
   "carrierPickupConfirmedAt": "2026-08-19T12:30:00Z",
   "trackingAvailableAt": "2026-08-19T09:07:47.071047Z",
   "trackingExpiresAt": "2027-02-15T09:07:47.071047Z",
@@ -133,7 +142,7 @@ GET /orders/tracking/{trackingToken}
 }
 ```
 
-`trackingStatus` values are `BOOKING`, `AWAITING_PICKUP`, `IN_TRANSIT`, `DELIVERED`, `EXCEPTION`, and `CANCELLED`. This is intentionally a full bearer-link order view: no JWT, guest token, or OTP is required, and anyone holding the URL can read buyer/vendor names, phone numbers, email addresses, full order addresses, item/pricing/parcel data, shipment identifiers and URLs, and escrow pending/released amounts. The vendor bank account is limited to the stored bank name, account name, bank code, and last four digits; ShopSecure does not retain or return the full account number. Raw share/payment tokens, payout-recipient IDs, encryption fields, and provider credentials are never returned. The endpoint is served from persisted state and never calls a carrier.
+`trackingStatus` values are `BOOKING`, `AWAITING_PICKUP`, `IN_TRANSIT`, `DELIVERED`, `EXCEPTION`, and `CANCELLED`. This is intentionally a full bearer-link order view: no JWT, guest token, or OTP is required, and anyone holding the URL can read buyer/vendor names, phone numbers, email addresses, full order addresses, item/pricing/parcel data, shipment identifiers and URLs, and escrow pending/released amounts. The same bearer token authorizes `POST /orders/tracking/{trackingToken}/confirm-delivery`, so a holder can also trigger the vendor payout once the order is eligible. The vendor bank account is limited to the stored bank name, account name, bank code, and last four digits; ShopSecure does not retain or return the full account number. Raw share/payment tokens, payout-recipient IDs, encryption fields, and provider credentials are never returned. The snapshot endpoint is served from persisted state and never calls a carrier.
 
 `ShippingStatusResponse` adds nullable `shopSecureTrackingUrl` and `trackingAvailableAt`. Both are null before confirmed payment and carry the same stable values in authenticated creator responses and verified guest status responses after funding. The URL remains unchanged as signed Terminal webhooks update the stored shipment status.
 
@@ -451,7 +460,7 @@ The backend loads one normalized Nigeria-wide catalogue through the active shipp
 | `POST` | `/orders/{orderId}/payments/wallet` | Buyer creator explicitly funds a wallet-mode order; requires `Idempotency-Key` |
 | `GET` | `/orders/{orderId}/shipping/tracking` | Refresh provider tracking |
 | `POST` | `/orders/{orderId}/shipping/cancel` | Cancel an eligible unpaid order |
-| `POST` | `/orders/{orderId}/confirm-delivery` | Legacy-policy buyer creator confirms with `{"confirmation":true}` and initiates vendor payout |
+| `POST` | `/orders/{orderId}/confirm-delivery` | Authenticated buyer creator confirms with `{"confirmation":true}` and initiates vendor payout |
 | `POST` | `/api/bank-accounts/resolve` | Resolve an account for an authenticated member |
 | `GET` | `/api/wallet` | Current wallet |
 | `GET` | `/api/wallet/transactions?page=0&size=20` | Paginated wallet ledger |
@@ -481,6 +490,7 @@ Authenticated creator responses from `GET /orders` and `GET /orders/{orderId}` i
 | Method | Endpoint | Access |
 |---|---|---|
 | `GET` | `/orders/tracking/{trackingToken}` | Public full bearer-link order, shipment, and escrow snapshot; no OTP |
+| `POST` | `/orders/tracking/{trackingToken}/confirm-delivery` | Public bearer-link delivery confirmation; no JWT, guest token, or OTP; requires `Idempotency-Key` |
 | `GET` | `/orders/token/{shareToken}` | Public safe order summary |
 | `GET` | `/api/banks` | Public Paystack-supported Nigerian banks |
 | `GET` | `/api/locations/states` | Public Nigerian shipping states |
@@ -570,25 +580,27 @@ GET  /relay/wallet/balance
 
 Chowdeck fee and wallet values are converted from kobo to NGN. Its fee ID is the persisted provider rate ID, and its locally enforced quote lifetime defaults to five minutes. The deterministic ShopSecure reference (`order-{id}` or `waybill-{publicId}`) is also the Relay delivery reference. A duplicate or ambiguous create response is reconciled by that reference before a later retry. Chowdeck callbacks trigger the same authenticated tracking reconciliation immediately; scheduled refresh remains the recovery path for missing callbacks or provider outages.
 
-After wallet funding, confirmed checkout, or exact legacy direct payment, the backend resolves the provider from the persisted shipment and checks that provider's wallet liquidity. Terminal drafts are tracked before every booking attempt so an already-active shipment is accepted instead of being booked twice. Chowdeck does not create a remote draft during quoting, so its first remote delivery creation occurs only after payment. Retries use persisted backoff, bounded batches, and a configurable attempt limit; exhausted or provider-terminal shipments become `MANUAL_REVIEW`. Drop-off-only Terminal rates are not offered. For V19 orders, carrier `IN_TRANSIT` releases seller funds; `DELIVERED` is used only as missed-pickup recovery and fulfillment completion.
+After wallet funding, confirmed checkout, or exact legacy direct payment, the backend resolves the provider from the persisted shipment and checks that provider's wallet liquidity. Terminal drafts are tracked before every booking attempt so an already-active shipment is accepted instead of being booked twice. Chowdeck does not create a remote draft during quoting, so its first remote delivery creation occurs only after payment. Retries use persisted backoff, bounded batches, and a configurable attempt limit; exhausted or provider-terminal shipments become `MANUAL_REVIEW`. Drop-off-only Terminal rates are not offered. Carrier `IN_TRANSIT` records pickup for every funded order. It releases seller funds only for an existing `CARRIER_PICKUP` order; current `BUYER_DELIVERY_CONFIRMATION` orders remain held until explicit confirmation.
 
 ## Settlement
 
 New buyer-created and vendor-created orders use the same release path:
 
 ```text
-authenticated carrier IN_TRANSIT
-  -> persist pickup and external settlement
+authenticated carrier IN_TRANSIT or DELIVERED
+  -> persist pickup evidence; keep item funds in escrow
+public tracking-link delivery confirmation
+  -> persist delivery confirmation and external settlement
   -> Paystack transfer of item amount to frozen vendor recipient
   -> transfer.success
-  -> order remains IN_TRANSIT until carrier DELIVERED
+  -> settlement and order complete
 ```
 
-The buyer's delivery and service charges are never paid to the seller. New orders do not require `POST /orders/{orderId}/confirm-delivery`, guest delivery OTP, or guest `confirm-delivery`; those endpoints reject `CARRIER_PICKUP` orders. They remain callable only for migrated orders whose persisted release policy is `BUYER_DELIVERY_CONFIRMATION`.
+The buyer's delivery and service charges are never paid to the seller. The public tracking-link mutation requires `{"confirmation":true}` and a stable `Idempotency-Key`, but no JWT, guest token, or OTP. The authenticated creator and OTP-protected guest confirmation routes remain available for compatible `BUYER_DELIVERY_CONFIRMATION` clients. All confirmation routes reject an existing `CARRIER_PICKUP` order because its persisted policy remains automatic.
 
 Paystack payout references are deterministic. Pending or unknown dispatch outcomes are reconciled on a persisted due-time queue through transfer verification. Each worker holds a fenced reconciliation token before provider I/O, and direct dispatch uses the same claim path. An ambiguous timeout, authentication failure, throttling response, conflict, or provider/server outage keeps the same reference for later verification. A narrowly classified definitive rejection, confirmed failure, mismatched reference or transfer ID, or successful response whose exact amount, `NGN` currency, or frozen recipient does not match stops automation in `REQUIRES_ACTION`; ShopSecure never creates a second automatic reference for that settlement. Reversal is terminal and cannot be overwritten by a replayed success event. Production is configured for fully automated transfers and therefore requires transfer OTP to be disabled in the ShopSecure Paystack account. An unexpected `otp` response remains `REQUIRES_ACTION` and never completes settlement.
 
-Pickup confirmation creates durable, independently retried buyer and vendor emails containing the stable ShopSecure tracking link. After Paystack reports transfer success, both participants also receive settlement email and SMS with carrier-pickup wording. Pending or unknown payouts do not claim that funds were credited. Duplicate pickup updates and payout-success events do not resend either notification type.
+Pickup confirmation creates durable, independently retried buyer and vendor emails containing the stable ShopSecure tracking link and stating that escrow remains held for buyer delivery confirmation. After Paystack reports transfer success, both participants receive settlement email and SMS with buyer-confirmation wording. Pending or unknown payouts do not claim that funds were credited. Duplicate pickup updates, confirmation replays, and payout-success events do not resend notifications or create another settlement.
 
 ## Webhooks
 
@@ -610,7 +622,7 @@ Configure the Chowdeck dashboard webhook URL as `https://<public-backend-host>/a
 }
 ```
 
-The submitted reference is an untrusted lookup hint, not pickup evidence. The backend first requires one exact persisted `CHOWDECK` shipment owner across the order and waybill domains, then calls authenticated `GET /relay/delivery/{reference}` and requires the returned reference to match. Only that canonical status and timeline enter the existing monotonic tracking pipeline. Canonical `IN_TRANSIT`/pickup evidence releases item amount only for an eligible paid V19 order; `CONFIRMED` never releases funds, and `DELIVERED` is only missed-pickup recovery plus fulfillment completion. Unknown, non-Chowdeck, inactive, and cross-domain-ambiguous references are acknowledged without a provider call or state change. Duplicate callbacks while tracking remains active repeat the same canonical reconciliation, whose locking, monotonic transitions, pickup marker, unique settlement, and deterministic payout reference prevent duplicate release. Invalid bodies return `400`; a known active shipment whose canonical reconciliation temporarily fails returns `503`, while scheduled polling remains the fallback.
+The submitted reference is an untrusted lookup hint, not pickup evidence. The backend first requires one exact persisted `CHOWDECK` shipment owner across the order and waybill domains, then calls authenticated `GET /relay/delivery/{reference}` and requires the returned reference to match. Only that canonical status and timeline enter the existing monotonic tracking pipeline. Canonical `IN_TRANSIT`/pickup evidence records pickup but does not release a current `BUYER_DELIVERY_CONFIRMATION` order; it still releases an eligible persisted `CARRIER_PICKUP` order. Unknown, non-Chowdeck, inactive, and cross-domain-ambiguous references are acknowledged without a provider call or state change. Duplicate callbacks repeat the same locked, monotonic reconciliation and cannot duplicate pickup evidence or settlement. Invalid bodies return `400`; a known active shipment whose canonical reconciliation temporarily fails returns `503`, while scheduled polling remains the fallback.
 
 Order funding commits before shipment booking begins. The post-commit booking attempt runs asynchronously so Paystack webhook responses do not wait on Terminal Africa network calls; persisted scheduled reconciliation retries failed or interrupted attempts.
 

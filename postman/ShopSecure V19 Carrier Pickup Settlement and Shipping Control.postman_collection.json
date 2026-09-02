@@ -1,8 +1,8 @@
 {
   "info": {
     "_postman_id": "a938299f-c207-4a14-a794-a8808d3c6584",
-    "name": "ShopSecure V19 Carrier Pickup Settlement and Shipping Control",
-    "description": "Authoritative complete-at-creation escrow, automatic carrier-pickup settlement, custom order tracking, waybill, and audited Chowdeck-control workflows. Run after authentication has populated {{jwt}}. OTP values and provider checkout completion remain manual checkpoints.",
+    "name": "ShopSecure Receiver-Confirmed Settlement and Shipping Control",
+    "description": "Authoritative complete-at-creation escrow, public tracking-link delivery confirmation, custom order tracking, waybill, and audited Chowdeck-control workflows. Run after authentication has populated {{jwt}}. Payment OTP values and provider checkout completion remain manual checkpoints.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "auth": {
@@ -34,7 +34,7 @@
             "listen": "test",
             "script": { "type": "text/javascript", "exec": [
               "pm.test('Complete buyer order created', () => pm.response.to.have.status(201));",
-              "if (pm.response.code === 201) { const data = pm.response.json(); pm.environment.set('buyerOrderId', data.id); pm.test('No create-time token or link', () => { pm.expect(data).not.to.have.property('shareToken'); pm.expect(data).not.to.have.property('shareableLink'); }); }"
+              "if (pm.response.code === 201) { const data = pm.response.json(); pm.environment.set('buyerOrderId', data.id); pm.expect(data.escrowReleasePolicy).to.eql('BUYER_DELIVERY_CONFIRMATION'); pm.test('No create-time token or link', () => { pm.expect(data).not.to.have.property('shareToken'); pm.expect(data).not.to.have.property('shareableLink'); }); }"
             ] }
           }],
           "request": {
@@ -94,12 +94,15 @@
           "response": []
         },
         {
-          "name": "07 Poll Automatic Pickup Settlement",
-          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
-            "pm.test('Order returned', () => pm.response.to.have.status(200));",
-            "if (pm.response.code === 200) { const data = pm.response.json(); pm.expect(data.escrowReleasePolicy).to.eql('CARRIER_PICKUP'); pm.environment.set('payoutReference', `shopsecure_order_${pm.environment.get('buyerOrderId')}_payout`); if (data.carrierPickupConfirmedAt) pm.test('Automatic settlement started', () => pm.expect(data.settlementStatus).not.to.eql('NOT_STARTED')); }"
-          ] } }],
-          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/orders/{{buyerOrderId}}", "description": "Repeat after an authenticated carrier update reports IN_TRANSIT. New orders automatically release the item amount to the frozen vendor bank recipient; there is no buyer delivery-confirmation mutation." },
+          "name": "07 Confirm Delivery From Public Tracking Link",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["if (!pm.environment.get('buyerDeliveryConfirmationKey')) pm.environment.set('buyerDeliveryConfirmationKey', pm.variables.replaceIn('{{$guid}}'));"] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('Delivery confirmation processed', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) { const data = pm.response.json(); pm.expect(data.settlementStatus).not.to.eql('NOT_STARTED'); pm.environment.set('payoutReference', `shopsecure_order_${pm.environment.get('buyerOrderId')}_payout`); }"
+            ] } }
+          ],
+          "request": { "auth": { "type": "noauth" }, "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Idempotency-Key", "value": "{{buyerDeliveryConfirmationKey}}" }], "body": { "mode": "raw", "options": { "raw": { "language": "json" } }, "raw": "{\n  \"confirmation\": true\n}" }, "url": "{{baseUrl}}/orders/tracking/{{buyerOrderTrackingToken}}/confirm-delivery", "description": "Run after the receiver has the item. No JWT, guest token, or OTP is required. Reuse the same idempotency key after a timeout." },
           "response": []
         }
       ]
@@ -112,7 +115,7 @@
           "name": "01 Create Complete Vendor Order",
           "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
             "pm.test('Complete vendor order created', () => pm.response.to.have.status(201));",
-            "if (pm.response.code === 201) { const data = pm.response.json(); pm.environment.set('vendorOrderId', data.id); pm.test('No create-time token or link', () => pm.expect(data).not.to.have.property('shareToken')); }"
+              "if (pm.response.code === 201) { const data = pm.response.json(); pm.environment.set('vendorOrderId', data.id); pm.expect(data.escrowReleasePolicy).to.eql('BUYER_DELIVERY_CONFIRMATION'); pm.test('No create-time token or link', () => pm.expect(data).not.to.have.property('shareToken')); }"
           ] } }],
           "request": {
             "method": "POST",
@@ -179,7 +182,7 @@
             "pm.test('Status returned', () => pm.response.to.have.status(200));",
             "if (pm.response.code === 200) { const data = pm.response.json(); if (data.paymentStatus === 'CONFIRMED') { const link = data.shipping && data.shipping.shopSecureTrackingUrl; pm.expect(link).to.be.a('string'); pm.environment.set('vendorOrderTrackingLink', link); pm.environment.set('vendorOrderTrackingToken', link.split('/').filter(Boolean).pop()); } }"
           ] } }],
-          "request": { "auth": { "type": "noauth" }, "method": "GET", "header": [{ "key": "X-Order-Access-Token", "value": "{{buyerPaymentAccessToken}}" }], "url": "{{baseUrl}}/orders/token/{{buyerPaymentToken}}/status", "description": "Repeat after provider payment and after carrier pickup until the expected payment, shipping, or automatic settlement state appears." },
+          "request": { "auth": { "type": "noauth" }, "method": "GET", "header": [{ "key": "X-Order-Access-Token", "value": "{{buyerPaymentAccessToken}}" }], "url": "{{baseUrl}}/orders/token/{{buyerPaymentToken}}/status", "description": "Repeat after provider payment and carrier updates until the expected payment or shipping state appears. Pickup does not release current orders." },
           "response": []
         },
         {
@@ -192,12 +195,15 @@
           "response": []
         },
         {
-          "name": "10 Poll Automatic Pickup Settlement",
-          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
-            "pm.test('Status returned', () => pm.response.to.have.status(200));",
-            "if (pm.response.code === 200) { const data = pm.response.json(); pm.expect(data.escrowReleasePolicy).to.eql('CARRIER_PICKUP'); pm.environment.set('payoutReference', `shopsecure_order_${pm.environment.get('vendorOrderId')}_payout`); if (data.carrierPickupConfirmedAt) pm.test('Automatic settlement started', () => pm.expect(data.settlementStatus).not.to.eql('NOT_STARTED')); }"
-          ] } }],
-          "request": { "auth": { "type": "noauth" }, "method": "GET", "header": [{ "key": "X-Order-Access-Token", "value": "{{buyerPaymentAccessToken}}" }], "url": "{{baseUrl}}/orders/token/{{buyerPaymentToken}}/status", "description": "Repeat after an authenticated carrier update reports IN_TRANSIT. New orders automatically release the item amount to the frozen vendor bank recipient; no delivery OTP is required." },
+          "name": "10 Confirm Delivery From Public Tracking Link",
+          "event": [
+            { "listen": "prerequest", "script": { "type": "text/javascript", "exec": ["if (!pm.environment.get('vendorDeliveryConfirmationKey')) pm.environment.set('vendorDeliveryConfirmationKey', pm.variables.replaceIn('{{$guid}}'));"] } },
+            { "listen": "test", "script": { "type": "text/javascript", "exec": [
+              "pm.test('Delivery confirmation processed', () => pm.response.to.have.status(200));",
+              "if (pm.response.code === 200) { const data = pm.response.json(); pm.expect(data.settlementStatus).not.to.eql('NOT_STARTED'); pm.environment.set('payoutReference', `shopsecure_order_${pm.environment.get('vendorOrderId')}_payout`); }"
+            ] } }
+          ],
+          "request": { "auth": { "type": "noauth" }, "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }, { "key": "Idempotency-Key", "value": "{{vendorDeliveryConfirmationKey}}" }], "body": { "mode": "raw", "options": { "raw": { "language": "json" } }, "raw": "{\n  \"confirmation\": true\n}" }, "url": "{{baseUrl}}/orders/tracking/{{vendorOrderTrackingToken}}/confirm-delivery", "description": "Run after the receiver has the item. No JWT, guest token, or OTP is required. Reuse the same idempotency key after a timeout." },
           "response": []
         }
       ]

@@ -1,10 +1,10 @@
 # ShopSecure Frontend API Handoff
 
-Last updated: 2026-08-22
+Last updated: 2026-08-25
 
 ## Contract Status
 
-This document describes the backend contract currently implemented in the ShopSecure working tree. The guest, shipping, wallet-first buyer payment, order-specific guest checkout, automatic carrier-pickup payout, legacy delivery-confirmation, standalone waybill delivery, order-dispute intake, admin operations, and audited Chowdeck control flows are implemented.
+This document describes the backend contract currently implemented in the ShopSecure working tree. The guest, shipping, wallet-first buyer payment, order-specific guest checkout, public receiver-confirmed escrow payout, persisted legacy carrier-pickup payout, standalone waybill delivery, order-dispute intake, admin operations, and audited Chowdeck control flows are implemented.
 
 The frontend must be released with the matching backend code and Flyway V20 migration. V20 is the current schema version. There is no API version prefix, so an old frontend cannot safely use the new backend contract.
 
@@ -13,8 +13,8 @@ The following V16 complete-at-creation rules, V17 tracking additions, V18 provid
 Important V16-V20 changes:
 
 - Every order funded after V17 receives one public bearer tracking link. The same link is returned to the creator and verified guest and emailed independently to the buyer and vendor; opening it requires no login or OTP.
-- New orders persist `escrowReleasePolicy: "CARRIER_PICKUP"`. Authenticated carrier `IN_TRANSIT` evidence automatically queues item amount only to the frozen vendor bank recipient; there is no buyer confirmation action.
-- Existing orders persist `BUYER_DELIVERY_CONFIRMATION` and retain their legacy confirmation workflow. Always branch on `escrowReleasePolicy`; never infer policy from creation date.
+- New orders persist `escrowReleasePolicy: "BUYER_DELIVERY_CONFIRMATION"`. Carrier pickup records evidence but does not release money; the tracking-page confirmation action queues item amount only to the frozen vendor bank recipient.
+- Already-created `CARRIER_PICKUP` orders retain automatic pickup payout. There is no data migration. Always branch on the persisted `escrowReleasePolicy`; never infer policy from creation date.
 - The first pickup observation records `carrierPickupConfirmedAt` and creates independently retried pickup emails for buyer and vendor. No frontend notification mutation is required.
 - Any visitor can submit one reason-only dispute against a funded order's numeric ID. The backend returns one generic `202`, does not change lifecycle state, and independently emails buyer, vendor, and operations.
 - Paid waybills now create durable sender and recipient pickup-stage emails containing the validated Terminal/carrier tracking link after the carrier confirms booking; no frontend notification mutation is required.
@@ -151,6 +151,18 @@ The tracking page calls the backend without a JWT:
 GET /orders/tracking/{trackingToken}
 ```
 
+For a current `BUYER_DELIVERY_CONFIRMATION` order, the same page submits the payout-triggering action without a JWT, guest token, or OTP:
+
+```http
+POST /orders/tracking/{trackingToken}/confirm-delivery
+Idempotency-Key: <stable-client-generated-key>
+Content-Type: application/json
+
+{ "confirmation": true }
+```
+
+Create one idempotency key for the order and retain it across timeouts/retries. Render an explicit final confirmation before sending, disable repeat clicks while the request is unresolved, and hide the action after `deliveryConfirmedAt` becomes non-null or escrow leaves `NOT_STARTED`.
+
 ```ts
 export type PublicOrderTrackingStatus =
   | "BOOKING"
@@ -262,7 +274,7 @@ export interface PublicOrderTrackingResponse {
 
 Poll the endpoint approximately every 30 seconds while the page is visible and either shipment tracking is active (`BOOKING`, `AWAITING_PICKUP`, or `IN_TRANSIT`) or `escrow.status` is `PENDING`/`DISPATCH_UNKNOWN`. A delivered parcel can still have a payout awaiting final verification, so do not stop solely because `trackingStatus` is `DELIVERED`. Stop routine polling when shipment and escrow are both terminal; provide manual refresh for `EXCEPTION` and `REQUIRES_ACTION`. Terminal webhooks plus Chowdeck callback-triggered authenticated refresh and fallback polling update persisted state, so the custom URL never changes and the browser must never call a carrier directly.
 
-No JWT, guest token, or OTP is sent. Anyone with the URL can read the complete buyer/vendor contact and address snapshots, pricing, parcel, shipment, and escrow amounts. Use `cache: "no-store"`, set the page-level referrer policy to `no-referrer`, and exclude the full URL and response body from analytics, session replay, link previews, error reports, and client logs. Do not load third-party scripts or assets on this page. A `404` means the link is invalid, expired, revoked, or unavailable; render one generic unavailable state.
+No JWT, guest token, or OTP is sent. Anyone with the URL can read the complete buyer/vendor contact and address snapshots, pricing, parcel, shipment, and escrow amounts and can submit delivery confirmation once the order is eligible. The same tracking link is emailed to buyer and vendor, so possession of the URL is the authorization boundary. Use `cache: "no-store"`, set the page-level referrer policy to `no-referrer`, and exclude the full URL and response body from analytics, session replay, link previews, error reports, and client logs. Do not load third-party scripts or assets on this page. A `404` means the link is invalid, expired, revoked, or unavailable; render one generic unavailable state.
 
 ## Frontend Waybill Implementation Brief
 
@@ -2025,9 +2037,10 @@ export interface AdminWaybillDetailResponse {
 | `POST` | `/orders/{orderId}/payments/wallet` | Buyer creator | `200` | `OrderWalletPaymentResponse` |
 | `GET` | `/orders/{orderId}/shipping/tracking` | Owner | `200` | `ShippingStatusResponse` |
 | `POST` | `/orders/{orderId}/shipping/cancel` | Owner | `200` | `ShippingStatusResponse` or empty |
-| `POST` | `/orders/{orderId}/confirm-delivery` | Legacy-policy buyer creator only | `200` | `DeliveryConfirmationResponse` |
+| `POST` | `/orders/{orderId}/confirm-delivery` | Authenticated buyer creator | `200` | `DeliveryConfirmationResponse` |
 | `GET` | `/orders/seller/pending-amount` | Member seller | `200` | `SellerPendingAmountResponse` |
 | `GET` | `/orders/tracking/{trackingToken}` | Public bearer URL; no OTP | `200` | `PublicOrderTrackingResponse` |
+| `POST` | `/orders/tracking/{trackingToken}/confirm-delivery` | Public bearer URL; no JWT, guest token, or OTP | `200` | `DeliveryConfirmationResponse` |
 | `GET` | `/orders/token/{shareToken}` | Public | `200` | `PublicOrderResponse` |
 | `POST` | `/orders/token/{shareToken}/payment-access-otp` | Public buyer | `202` | `OtpChallengeResponse` |
 | `POST` | `/orders/token/{shareToken}/verify-otp` | Public | `200` | `OrderVerificationResponse` |
@@ -2894,7 +2907,7 @@ Checkout rules:
 - A failed or abandoned attempt permits a later initialization. Pending or unknown verification continues returning the existing session; a successful exact verification confirms the order. A late success still maps to its original order.
 - Once any checkout URL has been initialized, direct cancellation is blocked because a late payment remains possible.
 - Do not call the member wallet-payment endpoint for checkout orders.
-- Checkout payment funds the order but does not pay the vendor yet. For new orders, item amount only is transferred to the frozen vendor bank recipient after authenticated carrier pickup.
+- Checkout payment funds the order but does not pay the vendor yet. For new orders, item amount only is transferred to the frozen vendor bank recipient after public tracking-link delivery confirmation.
 
 `DIRECT_DVA` remains possible only on migrated orders that had transfer instructions before V9. Do not build it as the normal vendor-order flow.
 
@@ -2968,17 +2981,17 @@ The response can be `200` with no body if no shipment draft exists. Refresh the 
 
 For `PAYSTACK_CHECKOUT`, hide cancellation as soon as checkout initialization succeeds. For `WALLET`, keep it available while the order remains eligible and hide it after wallet funding, any successful direct receipt, or payment confirmation. Migrated `DIRECT_DVA` orders remain non-cancellable after quote selection.
 
-## Carrier Pickup And Settlement
+## Delivery Confirmation And Settlement
 
-New orders return `escrowReleasePolicy: "CARRIER_PICKUP"`. Do not render a buyer delivery-confirmation button or request a delivery OTP for these orders.
+New orders return `escrowReleasePolicy: "BUYER_DELIVERY_CONFIRMATION"`. Render the confirmation action on the public ShopSecure tracking page; do not request a delivery OTP for this action.
 
-The backend distinguishes booking from pickup:
+The backend distinguishes carrier evidence from escrow release:
 
 - Shipment `PENDING` or `CONFIRMED`: booking/assignment only; escrow remains held.
-- Shipment `IN_TRANSIT`: authenticated pickup evidence; settlement starts automatically.
-- Shipment `DELIVERED`: fulfillment completes and also recovers settlement if the pickup update was missed.
+- Shipment `IN_TRANSIT`: authenticated pickup evidence is recorded; escrow remains held.
+- Shipment `DELIVERED`: carrier delivery is visible, but escrow still waits for tracking-link confirmation.
 
-The first pickup observation records `carrierPickupConfirmedAt`, queues item amount only to the frozen vendor bank recipient, and creates durable pickup emails for buyer and vendor. The frontend does not call a settlement mutation. Poll private order details or verified guest status:
+The first pickup observation records `carrierPickupConfirmedAt` and creates durable pickup emails for buyer and vendor. It does not create a payout settlement for a current order. Poll the tracking snapshot and enable the confirmation control while the receiver has the item, `escrow.releasePolicy` is `BUYER_DELIVERY_CONFIRMATION`, `escrow.status` is `NOT_STARTED`, and `deliveryConfirmedAt` is null:
 
 ```ts
 const pickupConfirmed = order.carrierPickupConfirmedAt != null;
@@ -2992,14 +3005,14 @@ const payoutProcessing = [
 
 State behavior:
 
-- Pickup accepted: order `PAYOUT_PENDING`; settlement normally `PENDING`.
-- Payout success before delivery: order `IN_TRANSIT`; settlement `COMPLETED`.
-- Carrier delivery after payout: order `COMPLETED`; settlement remains `COMPLETED`.
-- Failed/ambiguous payout: show processing or support state; never submit a second payout request.
+- Pickup accepted: order remains `READY_FOR_DELIVERY`; settlement remains `NOT_STARTED`.
+- Public confirmation accepted: order `PAYOUT_PENDING`; settlement normally `PENDING`.
+- Payout success: order and settlement become `COMPLETED`; shipment tracking can still remain `IN_TRANSIT` until its own carrier update.
+- Failed/ambiguous payout: show processing or support state; retry only with the same idempotency key and never submit a second payout intent.
 
-After Paystack confirms success, the backend sends buyer and vendor settlement email/SMS with carrier-pickup wording. A successful bank payout does not mean the parcel was delivered; keep the tracking UI visible until shipment `DELIVERED`.
+After Paystack confirms success, the backend sends buyer and vendor settlement email/SMS with buyer-confirmation wording. Keep shipment tracking visible if the carrier snapshot has not reached `DELIVERED`.
 
-Existing orders return `escrowReleasePolicy: "BUYER_DELIVERY_CONFIRMATION"`. Only for those persisted records, retain the legacy authenticated buyer or guest delivery-OTP confirmation flow and stable idempotency key. Never infer legacy behavior from dates or missing local state.
+Already-created orders can return `escrowReleasePolicy: "CARRIER_PICKUP"`. Those rows retain automatic settlement on authenticated carrier `IN_TRANSIT`/`DELIVERED` evidence and reject manual confirmation. Never infer policy from dates or missing local state.
 
 ## Wallet
 
@@ -3095,10 +3108,10 @@ Wallet-payment retries with the same idempotency key and duplicate checkout call
 | `AWAITING_SHIPPING_RATE` | The order creator requests and selects quotes; creator can still cancel. |
 | `AWAITING_PAYMENT` | Branch on `fundingMode`: show wallet payment/top-up UI to the registered buyer, or checkout initialization/return polling to the guest buyer. |
 | `SHIPMENT_BOOKING` | Poll only; backend is booking pickup. |
-| `READY_FOR_DELIVERY` | Show tracking; wait for carrier pickup. Do not render confirmation for `CARRIER_PICKUP` orders. |
+| `READY_FOR_DELIVERY` | Show tracking. For `BUYER_DELIVERY_CONFIRMATION`, allow the public tracking-link holder to confirm after receipt. |
 | `PAYOUT_PENDING` | Poll only; payout verification is automatic. |
-| `IN_TRANSIT` | Vendor payout succeeded while carrier delivery continues; keep tracking prominent. |
-| `COMPLETED` | Carrier delivered and settlement completed; continue to revalidate because an external payout can later reverse. |
+| `IN_TRANSIT` | Persisted `CARRIER_PICKUP` order whose vendor payout succeeded while carrier delivery continues; keep tracking prominent. |
+| `COMPLETED` | Settlement completed after confirmation, or legacy pickup settlement plus carrier delivery; continue to show carrier tracking when needed. |
 | `PAYMENT_FAILED` | Read-only support state; no dedicated frontend recovery endpoint. |
 | `SHIPPING_FAILED` | Show automatic recovery/support state; do not create a manual retry button. |
 | `PAYOUT_FAILED` | Show support state; do not initiate or promise an automatic second-reference payout. |
@@ -3122,7 +3135,7 @@ Shipping booking retries use persisted backoff and run automatically. Defaults a
 
 | Status | Frontend behavior |
 |---|---|
-| `NOT_STARTED` | Escrow is still held; normally waiting for carrier pickup. |
+| `NOT_STARTED` | Escrow is still held; current orders wait for receiver delivery confirmation. |
 | `PENDING` | Payout queued or dispatched; poll. |
 | `DISPATCH_UNKNOWN` | Backend is verifying an ambiguous result; no user action. |
 | `COMPLETED` | Settlement succeeded. |
@@ -3138,7 +3151,7 @@ Shipping booking retries use persisted backoff and run automatically. Defaults a
 | `PENDING` | Provider accepted booking; show tracking where available. |
 | `CONFIRMED` | Pickup booked. |
 | `IN_TRANSIT` | Show in-transit tracking. |
-| `DELIVERED` | Fulfillment complete; also catches up pickup settlement if `IN_TRANSIT` was missed. |
+| `DELIVERED` | Carrier reports fulfillment complete. It catches up automatic settlement only for persisted `CARRIER_PICKUP` orders. |
 | `CANCELLED` | Show support/cancelled state. A completed external payout requires manual financial review. |
 | `FAILED` | Show recovery/support state. A completed external payout requires manual financial review. |
 | `UNKNOWN` | Show waiting/support state. |
@@ -3152,9 +3165,9 @@ Registered creator is buyer; the recorded counterparty is vendor.
 3. Selection freezes the total and returns `fundingMode: "WALLET"`.
 4. Buyer explicitly calls wallet payment with an idempotency key; an insufficient response contains DVA top-up instructions.
 5. After funding, the backend books shipping and emails both parties the stable tracking link.
-6. Carrier `CONFIRMED` means awaiting pickup. Carrier `IN_TRANSIT` records pickup and automatically queues item amount to the frozen vendor bank recipient.
-7. Frontend polls settlement while continuing to display shipment tracking.
-8. Payout success changes the order to `IN_TRANSIT`; carrier `DELIVERED` changes it to `COMPLETED`.
+6. Carrier `CONFIRMED` means awaiting pickup. Carrier `IN_TRANSIT` records pickup but leaves escrow held.
+7. After receiving the item, the buyer confirms through the public tracking page with a stable idempotency key; no login or OTP is sent.
+8. Frontend polls settlement while continuing to display shipment tracking; payout success completes the order settlement.
 
 The vendor never receives delivery/service charges and never receives a ShopSecure wallet credit for a new order.
 
@@ -3167,10 +3180,10 @@ Registered creator is vendor; the recorded counterparty is buyer.
 3. Buyer verifies payment access, initializes Paystack Checkout, and completes the frozen total.
 4. The signed Paystack callback funds the order and starts carrier booking.
 5. Both parties use the stable tracking link. No buyer delivery OTP is requested for a new order.
-6. Carrier `IN_TRANSIT` records pickup and automatically queues item amount to the frozen vendor bank recipient.
-7. Payout success changes the order to `IN_TRANSIT`; carrier `DELIVERED` changes it to `COMPLETED`.
+6. Carrier `IN_TRANSIT` records pickup but leaves escrow held.
+7. After receipt, the buyer uses the tracking-page confirmation action; payout success completes the order settlement.
 
-The vendor creator owns shipping selection but cannot manually initiate settlement.
+The vendor creator owns shipping selection. The public tracking URL is a bearer capability, so anyone holding that shared URL can submit the confirmation action.
 
 ## Historical V14 Waybill Walkthrough (Superseded In V16)
 
@@ -3583,6 +3596,7 @@ On guest `403`, preserve the member session and offer guest access recovery.
 | Pay from wallet | Reuse the same key after a timeout; after an explicit insufficient response and later top-up, use a new key for the intentional retry. |
 | Initialize checkout | Repeat the same endpoint with the same guest token; an active session is replayed. Do not initialize directly with Paystack. |
 | Cancel order | Refresh after ambiguous result. |
+| Confirm delivery from tracking link | Reuse the same `Idempotency-Key` after every timeout; never create a second key unless the first request definitively failed before acceptance. |
 | Request legacy delivery OTP | Only when `escrowReleasePolicy === "BUYER_DELIVERY_CONFIRMATION"`; call again only after cooldown. |
 | Confirm legacy delivery | Only for the legacy policy; reuse the same `Idempotency-Key` for every retry. |
 | Create waybill | Reuse the same key with the identical normalized body; a replay returns `201`, `replayed: true`, and no invitation link. |
@@ -3685,7 +3699,7 @@ Legacy workflow orders are migrated to `MANUAL_REVIEW` and cannot resume the new
 - Add guest checkout initialization, redirect to `authorizationUrl`, callback return handling, and webhook-status polling for vendor-created orders.
 - Never treat a DVA top-up as automatic order payment.
 - Add stable tracking plus buyer/vendor pickup and settlement messaging.
-- Branch on `escrowReleasePolicy`; hide delivery confirmation for `CARRIER_PICKUP`, and preserve stable confirmation keys only for legacy-policy orders.
+- Branch on `escrowReleasePolicy`; show public tracking-link confirmation for `BUYER_DELIVERY_CONFIRMATION`, hide it for `CARRIER_PICKUP`, and preserve one stable confirmation key per order.
 - Add wallet refresh and bare-array ledger handling.
 - Add UI states for underpayment, overpayment, shipping recovery, payout intervention, and manual review.
 - Remove legacy pay, WhatsApp, escrow, and dual-balance UI.

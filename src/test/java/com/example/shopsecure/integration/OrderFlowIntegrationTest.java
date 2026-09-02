@@ -278,6 +278,8 @@ class OrderFlowIntegrationTest {
         JsonNode created = createOrder(CreatorRole.BUYER, null);
         long orderId = created.path("id").asLong();
         String shareToken = created.path("shareToken").asText();
+        assertThat(created.path("escrowReleasePolicy").asText())
+                .isEqualTo("BUYER_DELIVERY_CONFIRMATION");
 
         mockMvc.perform(get("/orders/token/{shareToken}", shareToken))
                 .andExpect(status().isNotFound());
@@ -435,7 +437,7 @@ class OrderFlowIntegrationTest {
                 .andExpect(jsonPath("$.shipment.status").value("CONFIRMED"))
                 .andExpect(jsonPath("$.shipment.selectedQuote.carrierName").value("Mock Logistics"))
                 .andExpect(jsonPath("$.shipment.trackingReference").isNotEmpty())
-                .andExpect(jsonPath("$.escrow.releasePolicy").value("CARRIER_PICKUP"))
+                .andExpect(jsonPath("$.escrow.releasePolicy").value("BUYER_DELIVERY_CONFIRMATION"))
                 .andExpect(jsonPath("$.escrow.status").value("NOT_STARTED"))
                 .andExpect(jsonPath("$.escrow.amountPending").value(125000.00))
                 .andExpect(jsonPath("$.escrow.amountReleased").value(0.00))
@@ -454,13 +456,49 @@ class OrderFlowIntegrationTest {
         mockMvc.perform(get("/orders/tracking/{trackingToken}", trackingToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.trackingStatus").value("IN_TRANSIT"))
-                .andExpect(jsonPath("$.orderStatus").value("PAYOUT_PENDING"))
+                .andExpect(jsonPath("$.orderStatus").value("READY_FOR_DELIVERY"))
                 .andExpect(jsonPath("$.carrierPickupConfirmedAt").isNotEmpty())
+                .andExpect(jsonPath("$.escrow.status").value("NOT_STARTED"))
+                .andExpect(jsonPath("$.escrow.amountPending").value(125000.00))
+                .andExpect(jsonPath("$.escrow.amountReleased").value(0.00));
+        assertThat(settlementRepository.findByOrder_Id(orderId)).isEmpty();
+        verify(payoutProvider, never()).initiatePayout(any(PayoutRequest.class));
+
+        String deliveryKey = "public-tracking-delivery-confirmation";
+        mockMvc.perform(post(
+                        "/orders/tracking/{trackingToken}/confirm-delivery",
+                        "not-a-valid-token"
+                )
+                        .header("Idempotency-Key", deliveryKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"confirmation\":true}"))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(post(
+                        "/orders/tracking/{trackingToken}/confirm-delivery",
+                        trackingToken
+                )
+                        .header("Idempotency-Key", deliveryKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"confirmation\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PAYOUT_PENDING"))
+                .andExpect(jsonPath("$.settlementStatus").value("PENDING"))
+                .andExpect(jsonPath("$.deliveryConfirmedAt").isNotEmpty());
+        mockMvc.perform(post(
+                        "/orders/tracking/{trackingToken}/confirm-delivery",
+                        trackingToken
+                )
+                        .header("Idempotency-Key", deliveryKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"confirmation\":true}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.settlementStatus").value("PENDING"));
+        mockMvc.perform(get("/orders/tracking/{trackingToken}", trackingToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.orderStatus").value("PAYOUT_PENDING"))
                 .andExpect(jsonPath("$.escrow.status").value("PENDING"))
                 .andExpect(jsonPath("$.escrow.settlementType").value("EXTERNAL_PAYOUT"))
-                .andExpect(jsonPath("$.escrow.trigger").value("CARRIER_PICKUP"))
-                .andExpect(jsonPath("$.escrow.amountPending").value(125000.00))
-                .andExpect(jsonPath("$.escrow.amountReleased").value(0.00))
+                .andExpect(jsonPath("$.escrow.trigger").value("BUYER_DELIVERY_CONFIRMATION"))
                 .andExpect(jsonPath("$.escrow.payoutReference").isNotEmpty());
         JsonNode inTransitOrder = responseJson(mockMvc.perform(get("/orders/{orderId}", orderId)
                         .with(user(creator.getEmail()).roles("USER")))
@@ -493,7 +531,7 @@ class OrderFlowIntegrationTest {
         assertThat(selectedOrder.getStatus()).isEqualTo(OrderStatus.PAYOUT_PENDING);
         assertThat(selectedOrder.getSettlementStatus()).isEqualTo(SettlementStatus.PENDING);
         assertThat(selectedOrder.getCarrierPickupConfirmedAt()).isNotNull();
-        assertThat(selectedOrder.getDeliveryConfirmedAt()).isNull();
+        assertThat(selectedOrder.getDeliveryConfirmedAt()).isNotNull();
         assertThat(selectedOrder.getProviderDeliveryFee()).isEqualByComparingTo("4750.00");
         assertThat(selectedOrder.getDeliveryMarkup()).isEqualByComparingTo("1000.00");
         assertThat(selectedOrder.getDeliveryFee()).isEqualByComparingTo("5750.00");
@@ -534,7 +572,7 @@ class OrderFlowIntegrationTest {
                 eq(CREATOR_EMAIL),
                 eq("Carrier pickup confirmed"),
                 argThat(html -> html.contains("carrier confirmed that the package")
-                        && html.contains("queued the item-fund payout")
+                        && html.contains("remain in escrow until the buyer confirms delivery")
                         && html.contains(trackingUrl)),
                 argThat(key -> key.startsWith("order-carrier-pickup/"))
         );
@@ -542,7 +580,7 @@ class OrderFlowIntegrationTest {
                 eq("bola.vendor@example.com"),
                 eq("Carrier pickup confirmed"),
                 argThat(html -> html.contains("carrier confirmed that the package")
-                        && html.contains("queued the item-fund payout")
+                        && html.contains("remain in escrow until the buyer confirms delivery")
                         && html.contains(trackingUrl)),
                 argThat(key -> key.startsWith("order-carrier-pickup/"))
         );
@@ -552,7 +590,7 @@ class OrderFlowIntegrationTest {
                         && message.contains("vendor has been notified"))
         );
         var settlement = settlementRepository.findByOrder_Id(orderId).orElseThrow();
-        assertThat(settlement.getTrigger()).isEqualTo(SettlementTrigger.CARRIER_PICKUP);
+        assertThat(settlement.getTrigger()).isEqualTo(SettlementTrigger.BUYER_DELIVERY_CONFIRMATION);
         assertThat(settlement.getAmount()).isEqualByComparingTo("125000.00");
         verify(payoutProvider, times(1)).initiatePayout(argThat((PayoutRequest request) ->
                 request.recipientId().equals("RCP_TEST_VENDOR")
@@ -579,6 +617,8 @@ class OrderFlowIntegrationTest {
         long orderId = created.path("id").asLong();
         String shareToken = created.path("shareToken").asText();
         assertThat(created.path("fundingMode").asText()).isEqualTo("PAYSTACK_CHECKOUT");
+        assertThat(created.path("escrowReleasePolicy").asText())
+                .isEqualTo("BUYER_DELIVERY_CONFIRMATION");
 
         mockMvc.perform(get("/orders/token/{shareToken}", shareToken))
                 .andExpect(status().isNotFound());

@@ -45,8 +45,9 @@ The final admin folder requires an `ADMIN` JWT. Its target mode defaults to `OFF
 3. As the authenticated creator, request and select a shipping quote.
 4. Pay the complete item + delivery + service total from the member wallet.
 5. Read the full custom ShopSecure tracking snapshot without authentication or OTP. The same bearer link is emailed to buyer and vendor, exposes both parties and escrow details to anyone holding it, and remains stable while carrier status changes.
-6. Wait for an authenticated carrier update to report `IN_TRANSIT`. The backend records pickup and automatically queues the item amount for the frozen vendor bank recipient.
-7. Poll the order while payout is pending. Payout success leaves fulfillment `IN_TRANSIT`; carrier `DELIVERED` completes the order.
+6. Wait for an authenticated carrier update to report `IN_TRANSIT`. The backend records pickup but keeps item funds in escrow.
+7. After receipt, call `POST /orders/tracking/{trackingToken}/confirm-delivery` with `{"confirmation":true}` and one stable `Idempotency-Key`. No JWT, guest token, or OTP is required; anyone holding the shared tracking link can trigger this action.
+8. Poll the order while payout is pending. Payout success completes settlement; continue showing carrier tracking if delivery status is still moving.
 
 If wallet payment returns `INSUFFICIENT_FUNDS`, the request records `walletShortfall`, `topUpAccountNumber`, and `topUpBankName`, then stops a collection-runner sequence. Top up the displayed DVA. For a local/test backend, the signed DVA webhook helper can simulate that provider callback. A DVA credit does not automatically pay the order; rerun wallet payment after the top-up appears. The response script clears the rejected key so that retry receives a new intentional payment key.
 
@@ -58,8 +59,9 @@ If wallet payment returns `INSUFFICIENT_FUNDS`, the request records `walletShort
 4. The buyer requests `payment-access-otp`, verifies it, and initializes Paystack Checkout.
 5. Complete `checkoutAuthorizationUrl` and poll status until shipping is ready.
 6. Open the full custom ShopSecure tracking snapshot after confirmed payment. The creator and guest responses contain the same public bearer URL; no tracking-page authentication or OTP is required.
-7. Wait for an authenticated carrier update to report `IN_TRANSIT`; no delivery OTP or buyer confirmation is required.
-8. Repeat the status request while the item amount is paid to the frozen vendor bank recipient. It is never credited to a ShopSecure wallet.
+7. Wait for an authenticated carrier update to report `IN_TRANSIT`; pickup alone does not release escrow.
+8. After receipt, call the public tracking-token confirmation mutation with a stable `Idempotency-Key`; no delivery OTP or account authentication is required.
+9. Repeat the status request while the item amount is paid to the frozen vendor bank recipient. It is never credited to a ShopSecure wallet.
 
 ### Waybill
 

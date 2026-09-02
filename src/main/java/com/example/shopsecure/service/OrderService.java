@@ -91,7 +91,7 @@ public class OrderService {
                 .fundingMode(request.creatorRole() == CreatorRole.BUYER
                         ? OrderFundingMode.WALLET
                         : OrderFundingMode.PAYSTACK_CHECKOUT)
-                .escrowReleasePolicy(EscrowReleasePolicy.CARRIER_PICKUP)
+                .escrowReleasePolicy(EscrowReleasePolicy.BUYER_DELIVERY_CONFIRMATION)
                 .status(OrderStatus.AWAITING_SHIPPING_RATE)
                 .shareToken(generateUniqueShareToken())
                 .vendorBankAccountLast4(lastFour(resolvedBank.accountNumber()))

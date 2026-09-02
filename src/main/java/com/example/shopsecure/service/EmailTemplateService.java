@@ -133,7 +133,7 @@ public class EmailTemplateService {
             SettlementStatus settlementStatus
     ) {
         if (releasePolicy != EscrowReleasePolicy.CARRIER_PICKUP) {
-            return "The escrow release terms for this existing order remain unchanged.";
+            return "The item funds remain in escrow until the buyer confirms delivery.";
         }
         if (settlementStatus == null) {
             return "Carrier pickup is recorded; vendor payout status is not yet available.";

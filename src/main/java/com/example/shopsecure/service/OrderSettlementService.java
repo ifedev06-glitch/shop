@@ -71,6 +71,19 @@ public class OrderSettlementService {
         return dispatchPayout(prepared, transaction);
     }
 
+    public DeliveryConfirmationResponse confirmPublicDelivery(
+            Long orderId,
+            String idempotencyKey
+    ) {
+        validateIdempotencyKey(idempotencyKey);
+        TransactionTemplate transaction = new TransactionTemplate(transactionManager);
+        PreparedPayout prepared = transaction.execute(status -> preparePublicPayout(orderId, idempotencyKey));
+        if (prepared == null || !prepared.dispatch()) {
+            return prepared == null ? null : prepared.response();
+        }
+        return dispatchPayout(prepared, transaction);
+    }
+
     @Scheduled(
             initialDelayString = "${payout.reconciliation.initial-delay-ms:60000}",
             fixedDelayString = "${payout.reconciliation.delay-ms:60000}"
@@ -312,15 +325,33 @@ public class OrderSettlementService {
         Order order = orderRepository.findByIdForUpdate(orderId)
                 .orElseThrow(() -> new ResourceNotFoundException("Order not found"));
         orderService.requireOwner(order);
-        requireBuyerDeliveryConfirmationPolicy(order);
         if (order.getCreatorRole() != CreatorRole.BUYER) {
             throw new BusinessException("Guest buyer confirmation is required for vendor-created orders");
         }
-        OrderSettlement existing = settlementRepository.findByOrderIdForUpdate(orderId).orElse(null);
+        return prepareDeliveryPayout(order, idempotencyKey, false);
+    }
+
+    private PreparedPayout preparePublicPayout(Long orderId, String idempotencyKey) {
+        Order order = orderRepository.findByIdForUpdate(orderId)
+                .orElseThrow(() -> new ResourceNotFoundException("Order not found"));
+        return prepareDeliveryPayout(
+                order,
+                idempotencyKey,
+                order.getCreatorRole() == CreatorRole.VENDOR
+        );
+    }
+
+    private PreparedPayout prepareDeliveryPayout(
+            Order order,
+            String idempotencyKey,
+            boolean allowLegacyWalletSettlement
+    ) {
+        requireBuyerDeliveryConfirmationPolicy(order);
+        OrderSettlement existing = settlementRepository.findByOrderIdForUpdate(order.getId()).orElse(null);
         if (existing != null) {
             requireMatchingKey(existing, idempotencyKey);
             return new PreparedPayout(
-                    orderId,
+                    order.getId(),
                     null,
                     existing.getAmount(),
                     existing.getPayoutReference(),
@@ -335,6 +366,16 @@ public class OrderSettlementService {
         requireActiveShipment(order);
         String recipientCode = vendorRecipientCode(order);
         if (recipientCode == null) {
+            if (allowLegacyWalletSettlement) {
+                return new PreparedPayout(
+                        order.getId(),
+                        null,
+                        order.getItemAmount(),
+                        null,
+                        false,
+                        completeLegacyWalletSettlement(order, idempotencyKey)
+                );
+            }
             throw new BusinessException("Vendor payout recipient is not available");
         }
         return prepareExternalPayout(order, idempotencyKey, recipientCode);

@@ -86,15 +86,13 @@ public class OrderTrackingService {
     }
 
     @Transactional(readOnly = true)
+    public Long requireActiveOrderId(String rawToken) {
+        return requireActiveAccess(rawToken).getOrder().getId();
+    }
+
+    @Transactional(readOnly = true)
     public PublicOrderTrackingResponse getPublicTracking(String rawToken) {
-        if (rawToken == null || !TOKEN_PATTERN.matcher(rawToken).matches()) {
-            throw trackingNotFound();
-        }
-        OrderTrackingAccessToken access = accessTokenRepository.findByTokenHash(hash(rawToken))
-                .orElseThrow(this::trackingNotFound);
-        if (!isActive(access, Instant.now())) {
-            throw trackingNotFound();
-        }
+        OrderTrackingAccessToken access = requireActiveAccess(rawToken);
 
         Order order = access.getOrder();
         OrderCounterparty counterparty = counterpartyRepository.findByOrder_Id(order.getId()).orElse(null);
@@ -351,6 +349,18 @@ public class OrderTrackingService {
                 && access.getRevokedAt() == null
                 && access.getExpiresAt() != null
                 && access.getExpiresAt().isAfter(now);
+    }
+
+    private OrderTrackingAccessToken requireActiveAccess(String rawToken) {
+        if (rawToken == null || !TOKEN_PATTERN.matcher(rawToken).matches()) {
+            throw trackingNotFound();
+        }
+        OrderTrackingAccessToken access = accessTokenRepository.findByTokenHash(hash(rawToken))
+                .orElseThrow(this::trackingNotFound);
+        if (!isActive(access, Instant.now())) {
+            throw trackingNotFound();
+        }
+        return access;
     }
 
     private Duration validTtl() {
